@@ -8,5 +8,5 @@
 - Transparency And Blending
 
 ## Download Latest Release
-🔗 [OAR tool.exe](https://github.com/FireNinja7365/Pixel-Art-App/releases/latest/download/pixel_art_app.exe)
+🔗 [pixel_art_app.exe](https://github.com/FireNinja7365/Pixel-Art-App/releases/latest/download/pixel_art_app.exe)
 
