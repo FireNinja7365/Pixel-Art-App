@@ -15,7 +15,7 @@ class ColorWheelPicker(ttk.Frame):
         self.color_change_callback = color_change_callback
 
         self.hue, self.saturation, self.value = 0.0, 1.0, 1.0
-        self.indicator_radius, self.sv_indicator_radius = 5, 8
+        self.indicator_radius, self.sv_indicator_radius = 6, 9
         self.drag_mode = None
 
         canvas_size = 150
@@ -39,7 +39,7 @@ class ColorWheelPicker(ttk.Frame):
             hue_indicator_y + self.indicator_radius,
             fill="white",
             outline="black",
-            width=2,
+            width=1,
             tags=("hue_indicator",),
         )
 
@@ -53,7 +53,7 @@ class ColorWheelPicker(ttk.Frame):
             sv_y + r,
             fill="white",
             outline="black",
-            width=2,
+            width=1,
             tags=("sv_indicator",),
         )
 
@@ -87,7 +87,8 @@ class ColorWheelPicker(ttk.Frame):
 
         angle, radius, center_x, center_y = self.hue * 2 * math.pi, 63.75, 75, 75
         indicator_x = center_x + radius * math.cos(angle)
-        indicator_y = center_y - radius * math.sin(-angle)
+
+        indicator_y = center_y - radius * math.sin(angle)
         r_hue = self.indicator_radius
         self.color_canvas.coords(
             self.hue_indicator,
@@ -608,7 +609,8 @@ class PixelArtApp:
 
     def _on_color_wheel_change(self, new_hex_color):
         self.current_color = new_hex_color
-        self.update_inputs_from_current_color()
+
+        self.update_inputs_from_current_color(source="wheel")
         self.update_color_preview()
 
     def on_hex_input(self, event):
