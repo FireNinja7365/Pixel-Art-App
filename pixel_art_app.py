@@ -181,12 +181,12 @@ class PixelArtApp:
             if self.icon_path.exists(): self.root.iconbitmap(str(self.icon_path))
         except Exception as e: print(f"Warning: Could not set application icon: {e}")
 
-        self.canvas_width = 32
-        self.canvas_height = 32
+        self.canvas_width = 100
+        self.canvas_height = 100
         self.canvas_bg_color = "#FFFFFF"
 
-        self.pixel_size = 15
-        self.min_pixel_size = 5
+        self.pixel_size = 5
+        self.min_pixel_size = 1
         self.max_pixel_size = 60
         self.zoom_factor = 1.2
 
@@ -282,13 +282,13 @@ class PixelArtApp:
         def apply_resize():
             try:
                 new_width = int(width_var.get()); new_height = int(height_var.get())
-                if 1 <= new_width <= 200 and 1 <= new_height <= 200:
+                if 1 <= new_width <= 512 and 1 <= new_height <= 512:
                     if self.canvas_width != new_width or self.canvas_height != new_height:
                         self.canvas_width = new_width
                         self.canvas_height = new_height
                         self.create_canvas()
                     dialog.destroy()
-                else: messagebox.showerror("Error", "Canvas size must be between 1 and 200 pixels", parent=dialog)
+                else: messagebox.showerror("Error", "Canvas size must be between 1 and 512 pixels", parent=dialog)
             except ValueError: messagebox.showerror("Error", "Please enter valid numbers for canvas size", parent=dialog)
         ttk.Button(button_frame, text="Apply", command=apply_resize).pack(side=tk.LEFT, padx=(0, 10)); ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT)
         width_entry.focus(); width_entry.select_range(0, tk.END); dialog.bind('<Return>', lambda e: apply_resize()); dialog.bind('<Escape>', lambda e: dialog.destroy())
@@ -315,7 +315,7 @@ class PixelArtApp:
     def on_window_resize(self, event):
         if event.widget == self.root:
             if self._after_id_resize: self.root.after_cancel(self._after_id_resize)
-            self._after_id_resize = self.root.after(50, self._update_visible_canvas_image)
+            self._after_id_resize = self.root.after(50, self._rescale_canvas)
 
     def setup_ui(self):
         main_frame = ttk.Frame(self.root); main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -331,7 +331,7 @@ class PixelArtApp:
         shape_line_frame = ttk.Frame(tools_frame)
         shape_line_frame.pack(fill=tk.X, anchor=tk.W, pady=(2, 0))
         ttk.Radiobutton(shape_line_frame, text="Shape", variable=self.tool_var, value="shape", command=self.change_tool).pack(side=tk.LEFT, anchor=tk.W)
-        
+
         self.shape_type_var = tk.StringVar(value="Line")
         shape_types = ["Line", "Rectangle", "Ellipse"]
         self.shape_combobox = ttk.Combobox(shape_line_frame, textvariable=self.shape_type_var, values=shape_types, state="readonly", width=12)
@@ -470,32 +470,82 @@ class PixelArtApp:
 
     def on_canvas_scroll(self, event):
         old_pixel_size = self.pixel_size
-        current_canvas_x = self.canvas.canvasx(event.x); current_canvas_y = self.canvas.canvasy(event.y)
+        current_canvas_x = self.canvas.canvasx(event.x)
+        current_canvas_y = self.canvas.canvasy(event.y)
+
         zoom_in = (event.delta > 0 or event.num == 4)
-        if zoom_in: new_pixel_size = self.pixel_size * self.zoom_factor
-        else: new_pixel_size = self.pixel_size / self.zoom_factor
+        if zoom_in and self.pixel_size < 3:
+            new_pixel_size = self.pixel_size + 1
+        elif zoom_in:
+            new_pixel_size = self.pixel_size * self.zoom_factor
+        else:
+            new_pixel_size = self.pixel_size / self.zoom_factor
+
         new_pixel_size = max(self.min_pixel_size, min(self.max_pixel_size, round(new_pixel_size)))
-        if new_pixel_size == old_pixel_size: return
+
+        if new_pixel_size == old_pixel_size:
+            return
+
         self.pixel_size = new_pixel_size
         self._update_canvas_scaling()
-        pixel_x_at_cursor = current_canvas_x / old_pixel_size; pixel_y_at_cursor = current_canvas_y / old_pixel_size
-        new_canvas_x_for_pixel = pixel_x_at_cursor * self.pixel_size; new_canvas_y_for_pixel = pixel_y_at_cursor * self.pixel_size
-        new_scroll_x_abs = new_canvas_x_for_pixel - event.x; new_scroll_y_abs = new_canvas_y_for_pixel - event.y
-        total_canvas_width = self.canvas_width * self.pixel_size; total_canvas_height = self.canvas_height * self.pixel_size
-        x_fraction = new_scroll_x_abs / total_canvas_width if total_canvas_width > 0 else 0
-        y_fraction = new_scroll_y_abs / total_canvas_height if total_canvas_height > 0 else 0
-        self.canvas.xview_moveto(x_fraction); self.canvas.yview_moveto(y_fraction)
+
+        pixel_x_at_cursor = current_canvas_x / old_pixel_size
+        pixel_y_at_cursor = current_canvas_y / old_pixel_size
+        new_canvas_x_for_pixel = pixel_x_at_cursor * self.pixel_size
+        new_canvas_y_for_pixel = pixel_y_at_cursor * self.pixel_size
+
+        new_scroll_x_abs = new_canvas_x_for_pixel - event.x
+        new_scroll_y_abs = new_canvas_y_for_pixel - event.y
+
+        s_region_str = self.canvas.cget('scrollregion')
+        if s_region_str:
+            try:
+                s_parts = list(map(int, s_region_str.split()))
+                s_x1, s_y1, s_x2, s_y2 = s_parts
+
+                total_scroll_width = s_x2 - s_x1
+                total_scroll_height = s_y2 - s_y1
+
+                if total_scroll_width > 0 and total_scroll_height > 0:
+                    x_fraction = (new_scroll_x_abs - s_x1) / total_scroll_width
+                    y_fraction = (new_scroll_y_abs - s_y1) / total_scroll_height
+
+                    self.canvas.xview_moveto(x_fraction)
+                    self.canvas.yview_moveto(y_fraction)
+            except (ValueError, IndexError):
+                pass
+
         self._update_visible_canvas_image()
 
     def _update_canvas_scaling(self):
-        total_width = self.canvas_width * self.pixel_size; total_height = self.canvas_height * self.pixel_size
-        h_lines = self.canvas.find_withtag("grid_h"); v_lines = self.canvas.find_withtag("grid_v")
+        total_width = self.canvas_width * self.pixel_size
+        total_height = self.canvas_height * self.pixel_size
+
+        h_lines = self.canvas.find_withtag("grid_h")
+        v_lines = self.canvas.find_withtag("grid_v")
         grid_state = 'normal' if self.show_grid_var.get() else 'hidden'
         for i, line_id in enumerate(h_lines):
-            y = (i + 1) * self.pixel_size; self.canvas.coords(line_id, 0, y, total_width, y); self.canvas.itemconfig(line_id, state=grid_state)
+            y = (i + 1) * self.pixel_size
+            self.canvas.coords(line_id, 0, y, total_width, y)
+            self.canvas.itemconfig(line_id, state=grid_state)
         for i, line_id in enumerate(v_lines):
-            x = (i + 1) * self.pixel_size; self.canvas.coords(line_id, x, 0, x, total_height); self.canvas.itemconfig(line_id, state=grid_state)
-        self.canvas.configure(scrollregion=(0, 0, total_width, total_height))
+            x = (i + 1) * self.pixel_size
+            self.canvas.coords(line_id, x, 0, x, total_height)
+            self.canvas.itemconfig(line_id, state=grid_state)
+
+        margin = 50
+        viewport_width = max(1, self.canvas.winfo_width())
+        viewport_height = max(1, self.canvas.winfo_height())
+
+        padding_x = max(0, viewport_width - margin)
+        padding_y = max(0, viewport_height - margin)
+
+        self.canvas.configure(scrollregion=(
+            -padding_x,
+            -padding_y,
+            total_width + padding_x,
+            total_height + padding_y
+        ))
 
     def _rescale_canvas(self): self._update_canvas_scaling(); self._update_visible_canvas_image()
 
@@ -544,6 +594,48 @@ class PixelArtApp:
         for i in range(self.canvas_width - 1): self.canvas.create_line(0,0,0,0, fill=self.grid_color, tags="grid_v")
         self._rescale_canvas()
         self.canvas.tag_raise("grid_h", "art_sprite"); self.canvas.tag_raise("grid_v", "art_sprite")
+        self.center_canvas_view()
+
+    def center_canvas_view(self):
+        self.canvas.update_idletasks()
+
+        total_width = self.canvas_width * self.pixel_size
+        total_height = self.canvas_height * self.pixel_size
+
+        viewport_width = self.canvas.winfo_width()
+        viewport_height = self.canvas.winfo_height()
+
+        if viewport_width <= 1 or viewport_height <= 1:
+            self.root.after(50, self.center_canvas_view)
+            return
+
+        target_x = (total_width - viewport_width) / 2
+        target_y = (total_height - viewport_height) / 2
+
+        s_region_str = self.canvas.cget('scrollregion')
+        if not s_region_str:
+            self._update_visible_canvas_image()
+            return
+
+        try:
+            s_parts = list(map(float, s_region_str.split()))
+            s_x1, s_y1, s_x2, s_y2 = s_parts
+
+            total_scroll_width = s_x2 - s_x1
+            total_scroll_height = s_y2 - s_y1
+
+            if total_scroll_width > 0:
+                x_fraction = (target_x - s_x1) / total_scroll_width
+                self.canvas.xview_moveto(x_fraction)
+
+            if total_scroll_height > 0:
+                y_fraction = (target_y - s_y1) / total_scroll_height
+                self.canvas.yview_moveto(y_fraction)
+
+        except (ValueError, IndexError):
+            pass
+
+        self._update_visible_canvas_image()
 
     def _update_visible_canvas_image(self):
         if self._after_id_render: self.root.after_cancel(self._after_id_render); self._after_id_render = None
@@ -638,11 +730,59 @@ class PixelArtApp:
         self._rescale_canvas()
 
     def _draw_preview_rect(self, x, y, is_eraser):
-        if x is None or y is None: return
-        x0, y0 = x * self.pixel_size, y * self.pixel_size; x1, y1 = x0 + self.pixel_size, y0 + self.pixel_size
-        fill_color = "#FFFFFF" if is_eraser else self.current_color
-        outline_color = "#000000" if is_eraser else ""
-        self.canvas.create_rectangle(x0, y0, x1, y1, fill=fill_color, outline=outline_color, width=1, tags="preview_stroke")
+        if x is None or y is None:
+            return
+        x0, y0 = x * self.pixel_size, y * self.pixel_size
+        x1, y1 = x0 + self.pixel_size, y0 + self.pixel_size
+
+        ultimate_bg_rgb = (0, 0, 0)
+        if self.show_canvas_background_var.get():
+            ultimate_bg_rgb = self._hex_to_rgb(self.canvas_bg_color)
+        else:
+            c1, c2 = (224, 224, 224), (240, 240, 240)
+            ultimate_bg_rgb = c1 if (x + y) % 2 == 0 else c2
+
+        if is_eraser:
+            fill_color = self._rgb_to_hex(*ultimate_bg_rgb)
+            outline_color = "#000000"
+            self.canvas.create_rectangle(x0, y0, x1, y1, fill=fill_color, outline=outline_color, width=1, tags="preview_stroke")
+            return
+
+        fg_rgb = self._hex_to_rgb(self.current_color)
+        fg_a_norm = self.current_alpha / 255.0
+
+        if fg_a_norm == 1.0:
+            fill_color = self.current_color
+            self.canvas.create_rectangle(x0, y0, x1, y1, fill=fill_color, outline="", width=1, tags="preview_stroke")
+            return
+
+        existing_pixel = self.pixel_data.get((x, y))
+        blending_is_on = self.color_blending_var.get()
+
+        base_rgb = (0, 0, 0)
+        if not blending_is_on or not existing_pixel:
+            base_rgb = ultimate_bg_rgb
+        else:
+            bg_hex, bg_a_int = existing_pixel
+            bg_rgb = self._hex_to_rgb(bg_hex)
+            bg_a_norm = (bg_a_int / 255.0) if self.render_pixel_alpha_var.get() else 1.0
+
+            r_base = bg_rgb[0] * bg_a_norm + ultimate_bg_rgb[0] * (1.0 - bg_a_norm)
+            g_base = bg_rgb[1] * bg_a_norm + ultimate_bg_rgb[1] * (1.0 - bg_a_norm)
+            b_base = bg_rgb[2] * bg_a_norm + ultimate_bg_rgb[2] * (1.0 - bg_a_norm)
+            base_rgb = (r_base, g_base, b_base)
+
+        r_out = fg_rgb[0] * fg_a_norm + base_rgb[0] * (1.0 - fg_a_norm)
+        g_out = fg_rgb[1] * fg_a_norm + base_rgb[1] * (1.0 - fg_a_norm)
+        b_out = fg_rgb[2] * fg_a_norm + base_rgb[2] * (1.0 - fg_a_norm)
+
+        final_rgb = (
+            min(255, max(0, int(round(r_out)))),
+            min(255, max(0, int(round(g_out)))),
+            min(255, max(0, int(round(b_out))))
+        )
+        fill_color = self._rgb_to_hex(*final_rgb)
+        self.canvas.create_rectangle(x0, y0, x1, y1, fill=fill_color, outline="", width=1, tags="preview_stroke")
 
     def _bresenham_line_pixels(self, x0, y0, x1, y1):
         dx, dy = abs(x1 - x0), abs(y1 - y0); sx, sy = (1 if x0 < x1 else -1), (1 if y0 < y1 else -1)
