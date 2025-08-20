@@ -8,6 +8,15 @@ import colorsys
 import re
 
 
+class Action:
+
+    def __init__(self):
+
+        self.pixels_before = {}
+
+        self.pixels_after = {}
+
+
 class ColorWheelPicker(ttk.Frame):
     def __init__(self, parent, color_change_callback):
         super().__init__(parent)
@@ -224,6 +233,7 @@ class PixelArtApp:
         self.current_color, self.current_alpha = "#ff0000", 255
         self.drawing, self.current_tool, self.eyedropper_mode = False, "pencil", False
         self._updating_color_inputs, self.mmb_eyedropper_active = False, False
+        self.panning = False
         self.original_cursor_before_mmb, self.original_cursor_before_pan = "", ""
         self.current_filename = None
         self.pixel_data = {}
@@ -241,11 +251,15 @@ class PixelArtApp:
         self.color_blending_var = tk.BooleanVar(value=False)
         self.show_grid_var = tk.BooleanVar(value=False)
 
+        self.undo_stack = []
+        self.redo_stack = []
+
         self.setup_menu()
         self.setup_ui()
         self.create_canvas()
         self._update_shape_controls_state()
         self.update_inputs_from_current_color()
+        self._update_history_controls()
 
     def _hex_to_rgb(self, hex_color_str):
         h = hex_color_str.lstrip("#")
@@ -262,6 +276,7 @@ class PixelArtApp:
     def setup_menu(self):
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
+
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
         file_menu.add_command(
@@ -319,8 +334,61 @@ class PixelArtApp:
             ("<Control-s>", self.save_file),
             ("<Control-Shift-S>", self.export_png),
             ("<Control-q>", lambda e: self.root.quit()),
+            ("<Control-z>", self.undo),
+            ("<Control-y>", self.redo),
         ]:
             self.root.bind(key, lambda e, f=func: f())
+
+    def _update_history_controls(self):
+        undo_state = tk.NORMAL if self.undo_stack else tk.DISABLED
+        redo_state = tk.NORMAL if self.redo_stack else tk.DISABLED
+        if hasattr(self, "undo_button"):
+            self.undo_button.config(state=undo_state)
+            self.redo_button.config(state=redo_state)
+
+    def _clear_history(self):
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self._update_history_controls()
+
+    def add_action(self, action):
+        if not action.pixels_before and not action.pixels_after:
+            return
+        self.undo_stack.append(action)
+        self.redo_stack.clear()
+        self._update_history_controls()
+
+    def undo(self, event=None):
+        if not self.undo_stack:
+            return
+        action = self.undo_stack.pop()
+
+        for (x, y), data_before in action.pixels_before.items():
+            if data_before:
+                self.pixel_data[(x, y)] = data_before
+            elif (x, y) in self.pixel_data:
+                del self.pixel_data[(x, y)]
+
+        self.redo_stack.append(action)
+        self._canvas_is_dirty = True
+        self._rescale_canvas()
+        self._update_history_controls()
+
+    def redo(self, event=None):
+        if not self.redo_stack:
+            return
+        action = self.redo_stack.pop()
+
+        for (x, y), data_after in action.pixels_after.items():
+            if data_after:
+                self.pixel_data[(x, y)] = data_after
+            elif (x, y) in self.pixel_data:
+                del self.pixel_data[(x, y)]
+
+        self.undo_stack.append(action)
+        self._canvas_is_dirty = True
+        self._rescale_canvas()
+        self._update_history_controls()
 
     def show_resize_dialog(self):
         dialog = tk.Toplevel(self.root)
@@ -358,6 +426,8 @@ class PixelArtApp:
                         new_height,
                     ):
                         self.canvas_width, self.canvas_height = new_width, new_height
+
+                        self._clear_history()
                         self.create_canvas()
                     dialog.destroy()
                 else:
@@ -433,6 +503,30 @@ class PixelArtApp:
             if self._after_id_resize:
                 self.root.after_cancel(self._after_id_resize)
             self._after_id_resize = self.root.after(50, self._rescale_canvas)
+
+    def _update_canvas_workarea_color(self):
+
+        if not self.show_canvas_background_var.get():
+            self.canvas.config(bg="#C0C0C0")
+            return
+
+        r, g, b = self._hex_to_rgb(self.canvas_bg_color)
+
+        grayscale_value = int(r * 0.299 + g * 0.587 + b * 0.114)
+
+        adjustment = 32
+
+        if grayscale_value >= 128:
+            new_gray_value = grayscale_value - adjustment
+
+        else:
+            new_gray_value = grayscale_value + adjustment
+
+        new_gray_value = max(0, min(255, new_gray_value))
+
+        new_hex_color = self._rgb_to_hex(new_gray_value, new_gray_value, new_gray_value)
+
+        self.canvas.config(bg=new_hex_color)
 
     def setup_ui(self):
         main_frame = ttk.Frame(self.root)
@@ -576,13 +670,25 @@ class PixelArtApp:
             color_frame, text="Pick Color (Eyedropper)", command=self.toggle_eyedropper
         ).pack(pady=10)
 
+        history_frame = ttk.LabelFrame(left_panel, text="History", padding=10)
+        history_frame.pack(fill=tk.X, pady=(0, 10))
+
+        button_container = ttk.Frame(history_frame)
+        button_container.pack()
+
+        self.undo_button = ttk.Button(button_container, text="Undo", command=self.undo)
+        self.undo_button.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.redo_button = ttk.Button(button_container, text="Redo", command=self.redo)
+        self.redo_button.pack(side=tk.LEFT)
+
         canvas_frame = ttk.Frame(main_frame)
         canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         v_scroll = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL)
         h_scroll = ttk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL)
         self.canvas = tk.Canvas(
             canvas_frame,
-            bg="white",
+            bg="#C0C0C0",
             yscrollcommand=v_scroll.set,
             xscrollcommand=h_scroll.set,
             highlightthickness=0,
@@ -606,6 +712,8 @@ class PixelArtApp:
         self.canvas.bind("<Button-4>", self.on_canvas_scroll)
         self.canvas.bind("<Button-5>", self.on_canvas_scroll)
         self.root.bind("<Configure>", self.on_window_resize)
+
+        self._update_canvas_workarea_color()
 
     def _on_color_wheel_change(self, new_hex_color):
         self.current_color = new_hex_color
@@ -756,6 +864,10 @@ class PixelArtApp:
                     )
             except (ValueError, IndexError):
                 pass
+
+        if self.panning:
+            self.canvas.scan_mark(event.x, event.y)
+
         self._update_visible_canvas_image()
 
     def _update_canvas_scaling(self):
@@ -1059,6 +1171,8 @@ class PixelArtApp:
             return
         if target_data == ("transparent", 0) and new_alpha == 0:
             return
+
+        action = Action()
         stack, processed = [(start_x, start_y)], set()
         while stack:
             x, y = stack.pop()
@@ -1067,12 +1181,19 @@ class PixelArtApp:
                 or (x, y) in processed
             ):
                 continue
-            if self.pixel_data.get((x, y), ("transparent", 0)) == target_data:
+
+            current_pixel_data = self.pixel_data.get((x, y), ("transparent", 0))
+            if current_pixel_data == target_data:
+                action.pixels_before[(x, y)] = current_pixel_data
                 processed.add((x, y))
                 self.draw_pixel(x, y, new_color_hex, new_alpha)
                 for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
                     stack.append((x + dx, y + dy))
+
         if processed:
+            for x, y in processed:
+                action.pixels_after[(x, y)] = self.pixel_data.get((x, y))
+            self.add_action(action)
             self._rescale_canvas()
 
     def _draw_preview_rect(self, x, y, is_eraser):
@@ -1258,6 +1379,9 @@ class PixelArtApp:
         self.drawing = False
         self.canvas.delete("preview_stroke")
         tool = self.tool_var.get()
+        action = Action()
+        pixels_to_process = set()
+
         if tool == "shape":
             if self.preview_shape_item:
                 self.canvas.delete(self.preview_shape_item)
@@ -1271,6 +1395,40 @@ class PixelArtApp:
             lock_aspect = self.lock_aspect_var.get() and (
                 str(self.lock_aspect_checkbox.cget("state")) == "normal"
             )
+
+            if shape_type == "Line":
+                pixels_to_process.update(
+                    self._bresenham_line_pixels(x0, y0, end_px, end_py)
+                )
+            elif shape_type == "Rectangle":
+                ex, ey = end_px, end_py
+                if lock_aspect:
+                    side = max(abs(end_px - x0), abs(end_py - y0))
+                    ex = x0 + side * (-1 if end_px < x0 else 1)
+                    ey = y0 + side * (-1 if end_py < y0 else 1)
+                xs, ys, xe, ye = min(x0, ex), min(y0, ey), max(x0, ex), max(y0, ey)
+                for x in range(xs, xe + 1):
+                    pixels_to_process.add((x, ys))
+                    pixels_to_process.add((x, ye))
+                for y in range(ys + 1, ye):
+                    pixels_to_process.add((xs, y))
+                    pixels_to_process.add((xe, y))
+            elif shape_type == "Ellipse":
+
+                rx_u, ry_u = abs(end_px - x0), abs(end_py - y0)
+                rx, ry = (
+                    (max(rx_u, ry_u), max(rx_u, ry_u)) if lock_aspect else (rx_u, ry_u)
+                )
+                bbox_x0, bbox_y0 = x0 - rx, y0 - ry
+                bbox_x1, bbox_y1 = x0 + rx, y0 + ry
+                for y in range(bbox_y0, bbox_y1 + 1):
+                    for x in range(bbox_x0, bbox_x1 + 1):
+                        pixels_to_process.add((x, y))
+
+            if pixels_to_process:
+                for px, py in pixels_to_process:
+                    action.pixels_before[(px, py)] = self.pixel_data.get((px, py))
+
             if shape_type == "Line":
                 self._draw_line_between_pixels(
                     x0,
@@ -1282,20 +1440,7 @@ class PixelArtApp:
                     False,
                 )
             elif shape_type == "Rectangle":
-                ex, ey = end_px, end_py
-                if lock_aspect:
-                    side = max(abs(end_px - x0), abs(end_py - y0))
-                    ex = x0 + side * (-1 if end_px < x0 else 1)
-                    ey = y0 + side * (-1 if end_py < y0 else 1)
-                xs, ys, xe, ye = min(x0, ex), min(y0, ey), max(x0, ex), max(y0, ey)
-                pixels = set()
-                for x in range(xs, xe + 1):
-                    pixels.add((x, ys))
-                    pixels.add((x, ye))
-                for y in range(ys + 1, ye):
-                    pixels.add((xs, y))
-                    pixels.add((xe, y))
-                for px, py in pixels:
+                for px, py in pixels_to_process:
                     self.draw_pixel(px, py, self.current_color, self.current_alpha)
             elif shape_type == "Ellipse":
                 rx_u, ry_u = abs(end_px - x0), abs(end_py - y0)
@@ -1305,21 +1450,33 @@ class PixelArtApp:
                 self._draw_ellipse_pixels(
                     x0, y0, rx, ry, self.current_color, self.current_alpha
                 )
-            if self._canvas_is_dirty:
-                self._rescale_canvas()
+
             self.start_shape_point = None
+
         elif tool in ["pencil", "eraser"]:
-            is_eraser = tool == "eraser"
-            color, alpha = (
-                ("transparent", 0)
-                if is_eraser
-                else (self.current_color, self.current_alpha)
-            )
-            for px, py in self.stroke_pixels_drawn_this_stroke:
-                self.draw_pixel(px, py, color, alpha)
-            if self._canvas_is_dirty:
-                self._rescale_canvas()
+            pixels_to_process = self.stroke_pixels_drawn_this_stroke.copy()
+            if pixels_to_process:
+                for px, py in pixels_to_process:
+                    action.pixels_before[(px, py)] = self.pixel_data.get((px, py))
+
+                is_eraser = tool == "eraser"
+                color, alpha = (
+                    ("transparent", 0)
+                    if is_eraser
+                    else (self.current_color, self.current_alpha)
+                )
+                for px, py in pixels_to_process:
+                    self.draw_pixel(px, py, color, alpha)
+
             self.last_draw_pixel_x = self.last_draw_pixel_y = None
+
+        if pixels_to_process:
+            for px, py in pixels_to_process:
+                action.pixels_after[(px, py)] = self.pixel_data.get((px, py))
+            self.add_action(action)
+
+        if self._canvas_is_dirty:
+            self._rescale_canvas()
 
     def _core_pick_color_at_pixel(self, px, py):
         if px is None:
@@ -1349,6 +1506,7 @@ class PixelArtApp:
             self.canvas.configure(cursor=self.original_cursor_before_mmb)
 
     def start_pan(self, event):
+        self.panning = True
         self.original_cursor_before_pan = self.canvas.cget("cursor")
         self.canvas.config(cursor="fleur")
         self.canvas.scan_mark(event.x, event.y)
@@ -1358,6 +1516,7 @@ class PixelArtApp:
         self._update_visible_canvas_image()
 
     def stop_pan(self, event):
+        self.panning = False
         self.canvas.config(cursor=self.original_cursor_before_pan)
 
     def change_tool(self):
@@ -1497,6 +1656,7 @@ class PixelArtApp:
             if self.canvas_bg_color != state["hex"]:
                 self.canvas_bg_color = state["hex"]
                 self._canvas_is_dirty = True
+                self._update_canvas_workarea_color()
                 if self.show_canvas_background_var.get():
                     self._update_visible_canvas_image()
             dialog.destroy()
@@ -1516,6 +1676,7 @@ class PixelArtApp:
         self._rescale_canvas()
 
     def toggle_canvas_background_display(self):
+        self._update_canvas_workarea_color()
         self._canvas_is_dirty = True
         self._rescale_canvas()
 
@@ -1531,6 +1692,8 @@ class PixelArtApp:
             self.current_filename = None
             self.canvas_bg_color = "#FFFFFF"
             self.root.title("Pixel Art Drawing App")
+            self._update_canvas_workarea_color()
+            self._clear_history()
             self.create_canvas()
 
     def open_file(self):
@@ -1554,7 +1717,10 @@ class PixelArtApp:
                         r, g, b, a = img.getpixel((x, y))
                         if a > 0:
                             self.pixel_data[(x, y)] = (self._rgb_to_hex(r, g, b), a)
+
+                self._clear_history()
                 self.create_canvas()
+
                 self.current_filename = filename
                 self.root.title(
                     f"Pixel Art Drawing App - {os .path .basename (filename )}"
