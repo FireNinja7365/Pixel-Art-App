@@ -7,6 +7,8 @@ import math
 import colorsys
 import re
 
+from tkinterdnd2 import DND_FILES, TkinterDnD
+
 
 class Action:
 
@@ -23,7 +25,7 @@ class ColorWheelPicker(ttk.Frame):
         self.pack(pady=5)
         self.color_change_callback = color_change_callback
 
-        self.hue, self.saturation, self.value = 0.0, 1.0, 1.0
+        self.hue, self.saturation, self.value = 0.0, 0.0, 0.0
         self.indicator_radius, self.sv_indicator_radius = 6, 9
         self.drag_mode = None
 
@@ -230,7 +232,7 @@ class PixelArtApp:
         self.pixel_size, self.min_pixel_size, self.max_pixel_size = 5, 1, 60
         self.zoom_factor = 1.2
         self.grid_color = "#cccccc"
-        self.current_color, self.current_alpha = "#ff0000", 255
+        self.current_color, self.current_alpha = "#000000", 255
         self.drawing, self.current_tool, self.eyedropper_mode = False, "pencil", False
         self._updating_color_inputs, self.mmb_eyedropper_active = False, False
         self.panning = False
@@ -239,14 +241,19 @@ class PixelArtApp:
         self.pixel_data = {}
         self.art_sprite_image, self.art_sprite_canvas_item = None, None
         self._after_id_render, self._after_id_resize = None, None
+
         self._full_art_image_cache = None
-        self._canvas_is_dirty = True
+
+        self._force_full_redraw = True
+        self._dirty_bbox = None
+
         self.last_draw_pixel_x, self.last_draw_pixel_y = None, None
         self.stroke_pixels_drawn_this_stroke = set()
         self.start_shape_point, self.preview_shape_item = None, None
         self.color_preview_image_tk = None
 
         self.show_canvas_background_var = tk.BooleanVar(value=False)
+        self.save_background_var = tk.BooleanVar(value=False)
         self.render_pixel_alpha_var = tk.BooleanVar(value=True)
         self.color_blending_var = tk.BooleanVar(value=False)
         self.show_grid_var = tk.BooleanVar(value=False)
@@ -254,12 +261,18 @@ class PixelArtApp:
         self.undo_stack = []
         self.redo_stack = []
 
+        self.canvas_menu = None
+
         self.setup_menu()
         self.setup_ui()
+
+        self.setup_drag_and_drop()
+
         self.create_canvas()
         self._update_shape_controls_state()
         self.update_inputs_from_current_color()
         self._update_history_controls()
+        self._update_save_background_menu_state()
 
     def _hex_to_rgb(self, hex_color_str):
         h = hex_color_str.lstrip("#")
@@ -272,6 +285,18 @@ class PixelArtApp:
 
     def _rgb_to_hex(self, r, g, b):
         return f"#{int (r ):02x}{int (g ):02x}{int (b ):02x}"
+
+    def _update_dirty_bbox(self, x, y):
+
+        if self._dirty_bbox is None:
+            self._dirty_bbox = (x, y, x + 1, y + 1)
+        else:
+            min_x, min_y, max_x, max_y = self._dirty_bbox
+            min_x = min(min_x, x)
+            min_y = min(min_y, y)
+            max_x = max(max_x, x + 1)
+            max_y = max(max_y, y + 1)
+            self._dirty_bbox = (min_x, min_y, max_x, max_y)
 
     def setup_menu(self):
         menubar = tk.Menu(self.root)
@@ -300,29 +325,32 @@ class PixelArtApp:
             label="Exit", command=self.root.quit, accelerator="Ctrl+Q"
         )
 
-        canvas_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Canvas", menu=canvas_menu)
-        canvas_menu.add_command(
+        self.canvas_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Canvas", menu=self.canvas_menu)
+        self.canvas_menu.add_command(
             label="Resize Canvas...", command=self.show_resize_dialog
         )
-        canvas_menu.add_command(
+        self.canvas_menu.add_command(
             label="Set Background Color...", command=self.choose_canvas_background_color
         )
-        canvas_menu.add_separator()
-        canvas_menu.add_checkbutton(
+        self.canvas_menu.add_separator()
+        self.canvas_menu.add_checkbutton(
             label="Show Background",
             variable=self.show_canvas_background_var,
             command=self.toggle_canvas_background_display,
         )
-        canvas_menu.add_checkbutton(
+        self.canvas_menu.add_checkbutton(
+            label="    Save Background", variable=self.save_background_var
+        )
+        self.canvas_menu.add_checkbutton(
             label="Show Grid",
             variable=self.show_grid_var,
             command=self.toggle_grid_visibility,
         )
-        canvas_menu.add_checkbutton(
+        self.canvas_menu.add_checkbutton(
             label="Color Blending", variable=self.color_blending_var
         )
-        canvas_menu.add_checkbutton(
+        self.canvas_menu.add_checkbutton(
             label="Render Pixel Alpha",
             variable=self.render_pixel_alpha_var,
             command=self.toggle_pixel_alpha_rendering,
@@ -346,6 +374,13 @@ class PixelArtApp:
             self.undo_button.config(state=undo_state)
             self.redo_button.config(state=redo_state)
 
+    def _update_save_background_menu_state(self):
+        if self.show_canvas_background_var.get():
+            self.canvas_menu.entryconfig("    Save Background", state=tk.NORMAL)
+        else:
+            self.save_background_var.set(False)
+            self.canvas_menu.entryconfig("    Save Background", state=tk.DISABLED)
+
     def _clear_history(self):
         self.undo_stack.clear()
         self.redo_stack.clear()
@@ -368,9 +403,9 @@ class PixelArtApp:
                 self.pixel_data[(x, y)] = data_before
             elif (x, y) in self.pixel_data:
                 del self.pixel_data[(x, y)]
+            self._update_dirty_bbox(x, y)
 
         self.redo_stack.append(action)
-        self._canvas_is_dirty = True
         self._rescale_canvas()
         self._update_history_controls()
 
@@ -384,9 +419,9 @@ class PixelArtApp:
                 self.pixel_data[(x, y)] = data_after
             elif (x, y) in self.pixel_data:
                 del self.pixel_data[(x, y)]
+            self._update_dirty_bbox(x, y)
 
         self.undo_stack.append(action)
-        self._canvas_is_dirty = True
         self._rescale_canvas()
         self._update_history_controls()
 
@@ -419,8 +454,9 @@ class PixelArtApp:
 
         def apply_resize():
             try:
+
                 new_width, new_height = int(width_var.get()), int(height_var.get())
-                if 1 <= new_width <= 512 and 1 <= new_height <= 512:
+                if 1 <= new_width <= 2048 and 1 <= new_height <= 2048:
                     if (self.canvas_width, self.canvas_height) != (
                         new_width,
                         new_height,
@@ -433,7 +469,7 @@ class PixelArtApp:
                 else:
                     messagebox.showerror(
                         "Error",
-                        "Canvas size must be between 1 and 512 pixels",
+                        "Canvas size must be between 1 and 2048 pixels",
                         parent=dialog,
                     )
             except ValueError:
@@ -715,6 +751,25 @@ class PixelArtApp:
 
         self._update_canvas_workarea_color()
 
+    def setup_drag_and_drop(self):
+
+        self.root.drop_target_register(DND_FILES)
+        self.root.dnd_bind("<<Drop>>", self.handle_drop)
+
+    def handle_drop(self, event):
+
+        filepath = event.data.strip("{}")
+
+        supported_extensions = (".png", ".jpg", ".jpeg", ".gif", ".bmp")
+        if not filepath.lower().endswith(supported_extensions):
+            return
+
+        prompt_message = (
+            "Open this image? Any unsaved changes on the current canvas will be lost."
+        )
+        if messagebox.askyesno("Open Dropped File", prompt_message, parent=self.root):
+            self._load_image_from_path(filepath)
+
     def _on_color_wheel_change(self, new_hex_color):
         self.current_color = new_hex_color
 
@@ -945,7 +1000,8 @@ class PixelArtApp:
     def create_canvas(self):
         self.canvas.delete("all")
         self.art_sprite_image = self._full_art_image_cache = None
-        self._canvas_is_dirty = True
+        self._force_full_redraw = True
+        self._dirty_bbox = None
         self.art_sprite_canvas_item = self.canvas.create_image(
             0, 0, anchor="nw", tags="art_sprite"
         )
@@ -993,6 +1049,7 @@ class PixelArtApp:
         if self._after_id_render:
             self.root.after_cancel(self._after_id_render)
             self._after_id_render = None
+
         viewport_w, viewport_h = self.canvas.winfo_width(), self.canvas.winfo_height()
         if viewport_w <= 1 or viewport_h <= 1:
             self._after_id_render = self.root.after(
@@ -1000,19 +1057,15 @@ class PixelArtApp:
             )
             return
 
-        if self._canvas_is_dirty:
+        if self._force_full_redraw or self._full_art_image_cache is None:
             art_image_full = Image.new(
                 "RGBA", (self.canvas_width, self.canvas_height), (0, 0, 0, 0)
             )
-            rgb_cache = {
-                hex_color: self._hex_to_rgb(hex_color)
-                for (px, py), (hex_color, alpha) in self.pixel_data.items()
-            }
             e_alpha = 255 if not self.render_pixel_alpha_var.get() else None
+
             for (px, py), (hex_color, alpha) in self.pixel_data.items():
-                art_image_full.putpixel(
-                    (px, py), rgb_cache[hex_color] + (e_alpha or alpha,)
-                )
+                rgb = self._hex_to_rgb(hex_color)
+                art_image_full.putpixel((px, py), rgb + (e_alpha or alpha,))
 
             if self.show_canvas_background_var.get():
                 final_full = Image.new(
@@ -1020,7 +1073,7 @@ class PixelArtApp:
                     (self.canvas_width, self.canvas_height),
                     self._hex_to_rgb(self.canvas_bg_color) + (255,),
                 )
-                final_full = Image.alpha_composite(final_full, art_image_full)
+                final_full.alpha_composite(art_image_full)
             else:
                 bg_full = Image.new("RGBA", (self.canvas_width, self.canvas_height))
                 draw_bg, c1, c2 = (
@@ -1032,7 +1085,48 @@ class PixelArtApp:
                     for x in range(self.canvas_width):
                         draw_bg.point((x, y), fill=c1 if (x + y) % 2 == 0 else c2)
                 final_full = Image.alpha_composite(bg_full, art_image_full)
-            self._full_art_image_cache, self._canvas_is_dirty = final_full, False
+
+            self._full_art_image_cache = final_full
+            self._force_full_redraw = False
+            self._dirty_bbox = None
+
+        elif self._dirty_bbox is not None:
+            min_x, min_y, max_x, max_y = self._dirty_bbox
+
+            dirty_art_layer = Image.new(
+                "RGBA", (max_x - min_x, max_y - min_y), (0, 0, 0, 0)
+            )
+            e_alpha = 255 if not self.render_pixel_alpha_var.get() else None
+
+            for (px, py), (hex_color, alpha) in self.pixel_data.items():
+                if min_x <= px < max_x and min_y <= py < max_y:
+                    rgb = self._hex_to_rgb(hex_color)
+                    dirty_art_layer.putpixel(
+                        (px - min_x, py - min_y), rgb + (e_alpha or alpha,)
+                    )
+
+            if self.show_canvas_background_var.get():
+                dirty_bg = Image.new(
+                    "RGBA",
+                    (max_x - min_x, max_y - min_y),
+                    self._hex_to_rgb(self.canvas_bg_color) + (255,),
+                )
+            else:
+                dirty_bg = Image.new("RGBA", (max_x - min_x, max_y - min_y))
+                draw_bg, c1, c2 = (
+                    ImageDraw.Draw(dirty_bg),
+                    (224, 224, 224),
+                    (240, 240, 240),
+                )
+                for y in range(max_y - min_y):
+                    for x in range(max_x - min_x):
+                        fill_c = c1 if ((x + min_x) + (y + min_y)) % 2 == 0 else c2
+                        draw_bg.point((x, y), fill=fill_c)
+
+            dirty_final = Image.alpha_composite(dirty_bg, dirty_art_layer)
+            self._full_art_image_cache.paste(dirty_final, (min_x, min_y))
+
+            self._dirty_bbox = None
 
         if self._full_art_image_cache is None:
             return
@@ -1048,6 +1142,7 @@ class PixelArtApp:
             self.canvas_height,
             math.ceil((canvas_y_start + viewport_h) / self.pixel_size),
         )
+
         if px_start >= px_end or py_start >= py_end:
             self.canvas.itemconfig(self.art_sprite_canvas_item, image="")
             self.art_sprite_image = None
@@ -1059,6 +1154,7 @@ class PixelArtApp:
         final_w, final_h = (px_end - px_start) * self.pixel_size, (
             py_end - py_start
         ) * self.pixel_size
+
         if final_w <= 0 or final_h <= 0:
             return
 
@@ -1123,7 +1219,7 @@ class PixelArtApp:
                 self.pixel_data[(x, y)] = new_pixel_data
             elif (x, y) in self.pixel_data:
                 del self.pixel_data[(x, y)]
-            self._canvas_is_dirty = True
+            self._update_dirty_bbox(x, y)
 
     def _draw_line_between_pixels(self, x0, y0, x1, y1, color_hex, alpha, is_eraser):
         for px, py in self._bresenham_line_pixels(x0, y0, x1, y1):
@@ -1414,39 +1510,30 @@ class PixelArtApp:
                     pixels_to_process.add((xs, y))
                     pixels_to_process.add((xe, y))
             elif shape_type == "Ellipse":
-
                 rx_u, ry_u = abs(end_px - x0), abs(end_py - y0)
                 rx, ry = (
                     (max(rx_u, ry_u), max(rx_u, ry_u)) if lock_aspect else (rx_u, ry_u)
                 )
                 bbox_x0, bbox_y0 = x0 - rx, y0 - ry
                 bbox_x1, bbox_y1 = x0 + rx, y0 + ry
+
                 for y in range(bbox_y0, bbox_y1 + 1):
                     for x in range(bbox_x0, bbox_x1 + 1):
-                        pixels_to_process.add((x, y))
+                        if ((x - x0) / rx) ** 2 + ((y - y0) / ry) ** 2 <= 1:
+                            pixels_to_process.add((x, y))
 
             if pixels_to_process:
                 for px, py in pixels_to_process:
                     action.pixels_before[(px, py)] = self.pixel_data.get((px, py))
 
             if shape_type == "Line":
-                self._draw_line_between_pixels(
-                    x0,
-                    y0,
-                    end_px,
-                    end_py,
-                    self.current_color,
-                    self.current_alpha,
-                    False,
-                )
+                for px, py in pixels_to_process:
+                    self.draw_pixel(px, py, self.current_color, self.current_alpha)
             elif shape_type == "Rectangle":
                 for px, py in pixels_to_process:
                     self.draw_pixel(px, py, self.current_color, self.current_alpha)
             elif shape_type == "Ellipse":
-                rx_u, ry_u = abs(end_px - x0), abs(end_py - y0)
-                rx, ry = (
-                    (max(rx_u, ry_u), max(rx_u, ry_u)) if lock_aspect else (rx_u, ry_u)
-                )
+
                 self._draw_ellipse_pixels(
                     x0, y0, rx, ry, self.current_color, self.current_alpha
                 )
@@ -1474,18 +1561,19 @@ class PixelArtApp:
             for px, py in pixels_to_process:
                 action.pixels_after[(px, py)] = self.pixel_data.get((px, py))
             self.add_action(action)
-
-        if self._canvas_is_dirty:
             self._rescale_canvas()
 
     def _core_pick_color_at_pixel(self, px, py):
         if px is None:
             return False
-        self.current_color, self.current_alpha = self.pixel_data.get(
-            (px, py), ("#ffffff", 0)
-        )
-        self.update_inputs_from_current_color()
-        return True
+
+        pixel_data = self.pixel_data.get((px, py))
+        if pixel_data:
+            self.current_color, self.current_alpha = pixel_data
+            self.update_inputs_from_current_color()
+            return True
+
+        return False
 
     def start_mmb_eyedropper(self, event):
         px, py = self.get_pixel_coords(event.x, event.y)
@@ -1655,7 +1743,7 @@ class PixelArtApp:
         def apply_choice():
             if self.canvas_bg_color != state["hex"]:
                 self.canvas_bg_color = state["hex"]
-                self._canvas_is_dirty = True
+                self._force_full_redraw = True
                 self._update_canvas_workarea_color()
                 if self.show_canvas_background_var.get():
                     self._update_visible_canvas_image()
@@ -1677,11 +1765,12 @@ class PixelArtApp:
 
     def toggle_canvas_background_display(self):
         self._update_canvas_workarea_color()
-        self._canvas_is_dirty = True
+        self._force_full_redraw = True
         self._rescale_canvas()
+        self._update_save_background_menu_state()
 
     def toggle_pixel_alpha_rendering(self):
-        self._canvas_is_dirty = True
+        self._force_full_redraw = True
         self._rescale_canvas()
 
     def new_canvas(self):
@@ -1694,6 +1783,7 @@ class PixelArtApp:
             self.root.title("Pixel Art Drawing App")
             self._update_canvas_workarea_color()
             self._clear_history()
+            self._force_full_redraw = True
             self.create_canvas()
 
     def open_file(self):
@@ -1706,6 +1796,11 @@ class PixelArtApp:
         )
         if not filename:
             return
+
+        self._load_image_from_path(filename)
+
+    def _load_image_from_path(self, filename):
+
         try:
             with Image.open(filename) as img:
                 img = img.convert("RGBA")
@@ -1719,6 +1814,7 @@ class PixelArtApp:
                             self.pixel_data[(x, y)] = (self._rgb_to_hex(r, g, b), a)
 
                 self._clear_history()
+                self._force_full_redraw = True
                 self.create_canvas()
 
                 self.current_filename = filename
@@ -1749,12 +1845,27 @@ class PixelArtApp:
 
     def export_to_png(self, filename):
         try:
-            img = Image.new(
-                "RGBA", (self.canvas_width, self.canvas_height), (255, 255, 255, 0)
-            )
-            for (x, y), (h, a) in self.pixel_data.items():
-                if h != "transparent" and a > 0:
-                    img.putpixel((x, y), self._hex_to_rgb(h) + (a,))
+            if self.show_canvas_background_var.get() and self.save_background_var.get():
+                bg_color_tuple = self._hex_to_rgb(self.canvas_bg_color) + (255,)
+                img = Image.new(
+                    "RGBA", (self.canvas_width, self.canvas_height), bg_color_tuple
+                )
+
+                pixel_layer = Image.new(
+                    "RGBA", (self.canvas_width, self.canvas_height), (0, 0, 0, 0)
+                )
+                for (x, y), (h, a) in self.pixel_data.items():
+                    if h != "transparent" and a > 0:
+                        pixel_layer.putpixel((x, y), self._hex_to_rgb(h) + (a,))
+
+                img = Image.alpha_composite(img, pixel_layer)
+            else:
+                img = Image.new(
+                    "RGBA", (self.canvas_width, self.canvas_height), (255, 255, 255, 0)
+                )
+                for (x, y), (h, a) in self.pixel_data.items():
+                    if h != "transparent" and a > 0:
+                        img.putpixel((x, y), self._hex_to_rgb(h) + (a,))
             img.save(filename, "PNG")
             if filename == self.current_filename or self.current_filename is None:
                 self.current_filename = filename
@@ -1769,7 +1880,9 @@ class PixelArtApp:
 
 
 def main():
-    root = tk.Tk()
+
+    root = TkinterDnD.Tk()
+
     PixelArtApp(root)
     root.mainloop()
 
