@@ -218,7 +218,7 @@ class PixelArtApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Pixel Art Drawing App")
-        self.root.geometry("1260x710")
+        self.root.geometry("1260x720")
 
         self.icon_path = Path(__file__).parent / "assets" / "app.ico"
         try:
@@ -656,9 +656,9 @@ class PixelArtApp:
         color_frame = ttk.LabelFrame(left_panel, text="Color Picker", padding=10)
         color_frame.pack(fill=tk.X, pady=(0, 10))
         preview_container = ttk.Frame(color_frame)
-        preview_container.pack(pady=(0, 10))
+        preview_container.pack()
         self.color_preview_canvas = self.create_transparent_color_preview(
-            preview_container, width=120, height=40
+            preview_container, width=120, height=30
         )
         self.color_preview_canvas.pack()
         self.color_wheel = ColorWheelPicker(color_frame, self._on_color_wheel_change)
