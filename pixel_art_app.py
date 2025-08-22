@@ -218,7 +218,7 @@ class PixelArtApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Pixel Art Drawing App")
-        self.root.geometry("1000x700")
+        self.root.geometry("1260x710")
 
         self.icon_path = Path(__file__).parent / "assets" / "app.ico"
         try:
@@ -230,10 +230,12 @@ class PixelArtApp:
         self.canvas_width, self.canvas_height = 100, 100
         self.canvas_bg_color = "#FFFFFF"
         self.pixel_size, self.min_pixel_size, self.max_pixel_size = 5, 1, 60
+        self.brush_size = 1
         self.zoom_factor = 1.2
         self.grid_color = "#cccccc"
         self.current_color, self.current_alpha = "#000000", 255
         self.drawing, self.current_tool, self.eyedropper_mode = False, "pencil", False
+        self.last_used_tool = "pencil"
         self._updating_color_inputs, self.mmb_eyedropper_active = False, False
         self.panning = False
         self.original_cursor_before_mmb, self.original_cursor_before_pan = "", ""
@@ -255,8 +257,9 @@ class PixelArtApp:
         self.show_canvas_background_var = tk.BooleanVar(value=False)
         self.save_background_var = tk.BooleanVar(value=False)
         self.render_pixel_alpha_var = tk.BooleanVar(value=True)
-        self.color_blending_var = tk.BooleanVar(value=False)
+        self.color_blending_var = tk.BooleanVar(value=True)
         self.show_grid_var = tk.BooleanVar(value=False)
+        self.brush_size_var = tk.IntVar(value=self.brush_size)
 
         self.undo_stack = []
         self.redo_stack = []
@@ -270,6 +273,7 @@ class PixelArtApp:
 
         self.create_canvas()
         self._update_shape_controls_state()
+        self._update_brush_controls_state()
         self.update_inputs_from_current_color()
         self._update_history_controls()
         self._update_save_background_menu_state()
@@ -611,6 +615,44 @@ class PixelArtApp:
         )
         self.lock_aspect_checkbox.pack(pady=(2, 0), padx=(20, 0), anchor=tk.W)
 
+        self.brush_size_frame = ttk.LabelFrame(
+            tools_frame, text="Brush Size", padding=5
+        )
+        self.brush_size_frame.pack(fill=tk.X, pady=(10, 0), anchor=tk.W)
+
+        brush_size_inner_frame = ttk.Frame(self.brush_size_frame)
+        brush_size_inner_frame.pack(fill=tk.X)
+
+        self.brush_size_slider = tk.Scale(
+            brush_size_inner_frame,
+            from_=1,
+            to=20,
+            orient=tk.HORIZONTAL,
+            showvalue=0,
+            variable=self.brush_size_var,
+            command=self.on_brush_size_change,
+            bg="#A0A0A0",
+            troughcolor="#E0E0E0",
+            activebackground="#606060",
+            sliderrelief=tk.RAISED,
+            width=15,
+            sliderlength=20,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.brush_size_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.brush_size_slider.bind(
+            "<Button-1>", lambda e: self._on_slider_click(e, self.brush_size_slider)
+        )
+
+        self.brush_size_label = ttk.Label(
+            brush_size_inner_frame,
+            text=f"{self .brush_size }",
+            width=5,
+            anchor="e",
+        )
+        self.brush_size_label.pack(side=tk.RIGHT, padx=(5, 0))
+
         color_frame = ttk.LabelFrame(left_panel, text="Color Picker", padding=10)
         color_frame.pack(fill=tk.X, pady=(0, 10))
         preview_container = ttk.Frame(color_frame)
@@ -640,13 +682,13 @@ class PixelArtApp:
         ttk.Label(color_inputs_frame, text="RGB:", width=5).grid(
             row=1, column=0, padx=(0, 5), pady=(5, 0), sticky="w"
         )
-        rgb_vcmd = (self.root.register(self.validate_rgb_input), "%P")
+        digit_only_vcmd = (self.root.register(lambda v: v == "" or v.isdigit()), "%P")
         r_entry = ttk.Entry(
             color_inputs_frame,
             textvariable=self.r_var,
             width=4,
             validate="key",
-            validatecommand=rgb_vcmd,
+            validatecommand=digit_only_vcmd,
         )
         r_entry.grid(row=1, column=1, pady=(5, 0), sticky="w")
         g_entry = ttk.Entry(
@@ -654,7 +696,7 @@ class PixelArtApp:
             textvariable=self.g_var,
             width=4,
             validate="key",
-            validatecommand=rgb_vcmd,
+            validatecommand=digit_only_vcmd,
         )
         g_entry.grid(row=1, column=2, pady=(5, 0), sticky="w")
         b_entry = ttk.Entry(
@@ -662,7 +704,7 @@ class PixelArtApp:
             textvariable=self.b_var,
             width=4,
             validate="key",
-            validatecommand=rgb_vcmd,
+            validatecommand=digit_only_vcmd,
         )
         b_entry.grid(row=1, column=3, pady=(5, 0), sticky="w")
         for entry in [r_entry, g_entry, b_entry]:
@@ -672,14 +714,13 @@ class PixelArtApp:
         alpha_frame = ttk.Frame(color_frame)
         alpha_frame.pack(fill=tk.X, pady=(10, 0))
         self.alpha_var = tk.StringVar(value="255")
-        vcmd = (self.root.register(lambda v: v == "" or v.isdigit()), "%P")
         ttk.Label(alpha_frame, text="A:", width=2).pack(side=tk.LEFT, padx=(0, 5))
         alpha_entry = ttk.Entry(
             alpha_frame,
             textvariable=self.alpha_var,
             width=6,
             validate="key",
-            validatecommand=vcmd,
+            validatecommand=digit_only_vcmd,
         )
         alpha_entry.pack(side=tk.LEFT, padx=(0, 10))
         alpha_entry.bind("<KeyRelease>", self.on_alpha_entry_change)
@@ -701,6 +742,9 @@ class PixelArtApp:
             bd=0,
         )
         self.alpha_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.alpha_slider.bind(
+            "<Button-1>", lambda e: self._on_slider_click(e, self.alpha_slider)
+        )
         self.alpha_slider.set(self.current_alpha)
         ttk.Button(
             color_frame, text="Pick Color (Eyedropper)", command=self.toggle_eyedropper
@@ -771,6 +815,10 @@ class PixelArtApp:
             self._load_image_from_path(filepath)
 
     def _on_color_wheel_change(self, new_hex_color):
+        if self.current_tool == "eraser":
+            self.tool_var.set(self.last_used_tool)
+            self.change_tool()
+
         self.current_color = new_hex_color
 
         self.update_inputs_from_current_color(source="wheel")
@@ -792,21 +840,26 @@ class PixelArtApp:
     def on_rgb_input(self, event=None):
         if self._updating_color_inputs:
             return
+
+        for var in [self.r_var, self.g_var, self.b_var]:
+            try:
+                val_str = var.get()
+                if val_str and int(val_str) > 255:
+                    var.set("255")
+            except (ValueError, tk.TclError):
+                pass
+
         try:
-            r, g, b = (
-                int(self.r_var.get() or 0),
-                int(self.g_var.get() or 0),
-                int(self.b_var.get() or 0),
-            )
+            r = int(self.r_var.get() or 0)
+            g = int(self.g_var.get() or 0)
+            b = int(self.b_var.get() or 0)
+
             new_color = self._rgb_to_hex(r, g, b)
             if self.current_color != new_color:
                 self.current_color = new_color
                 self.update_inputs_from_current_color(source="rgb")
         except (ValueError, tk.TclError):
             pass
-
-    def validate_rgb_input(self, val):
-        return val == "" or (val.isdigit() and 0 <= int(val) <= 255)
 
     def on_rgb_input_focus_out(self, event):
         if self._updating_color_inputs:
@@ -858,6 +911,31 @@ class PixelArtApp:
         if self.alpha_var.get() != val_int_str:
             self.alpha_var.set(val_int_str)
         self.update_color_preview()
+
+    def _on_slider_click(self, event, slider):
+
+        element = slider.identify(event.x, event.y)
+        if element not in ("trough1", "trough2"):
+            return
+
+        click_pos = event.x
+        widget_size = slider.winfo_width()
+
+        if widget_size == 0:
+            return
+
+        from_ = float(slider.cget("from"))
+        to = float(slider.cget("to"))
+        value_range = to - from_
+
+        fraction = max(0.0, min(1.0, click_pos / widget_size))
+        new_value = from_ + (fraction * value_range)
+
+        slider.set(new_value)
+
+    def on_brush_size_change(self, value):
+        self.brush_size = self.brush_size_var.get()
+        self.brush_size_label.config(text=f"{self .brush_size }")
 
     def on_scroll_y(self, *args):
         self.canvas.yview(*args)
@@ -975,6 +1053,12 @@ class PixelArtApp:
         is_shape_tool = self.tool_var.get() == "shape"
         self.shape_combobox.config(state="readonly" if is_shape_tool else tk.DISABLED)
         self.on_shape_type_change()
+
+    def _update_brush_controls_state(self):
+        tool = self.tool_var.get()
+        new_state = tk.NORMAL if tool in ["pencil", "eraser"] else tk.DISABLED
+        self.brush_size_slider.config(state=new_state)
+        self.brush_size_label.config(state=new_state)
 
     def update_inputs_from_current_color(self, source=None):
         if not self.current_color or not hasattr(self, "color_wheel"):
@@ -1292,6 +1376,18 @@ class PixelArtApp:
             self.add_action(action)
             self._rescale_canvas()
 
+    def _get_brush_pixels(self, center_x, center_y):
+
+        if self.brush_size == 1:
+            yield (center_x, center_y)
+            return
+
+        offset = (self.brush_size - 1) // 2
+        start_x, start_y = center_x - offset, center_y - offset
+        for y_off in range(self.brush_size):
+            for x_off in range(self.brush_size):
+                yield (start_x + x_off, start_y + y_off)
+
     def _draw_preview_rect(self, x, y, is_eraser):
         if x is None or y is None:
             return
@@ -1355,6 +1451,10 @@ class PixelArtApp:
             tags="preview_stroke",
         )
 
+    def _draw_preview_brush(self, center_x, center_y, is_eraser):
+        for px, py in self._get_brush_pixels(center_x, center_y):
+            self._draw_preview_rect(px, py, is_eraser)
+
     def _bresenham_line_pixels(self, x0, y0, x1, y1):
         dx, dy = abs(x1 - x0), abs(y1 - y0)
         sx, sy = (1 if x0 < x1 else -1), (1 if y0 < y1 else -1)
@@ -1388,8 +1488,9 @@ class PixelArtApp:
             if tool == "fill":
                 self.flood_fill(px, py, self.current_color, self.current_alpha)
             else:
-                self._draw_preview_rect(px, py, tool == "eraser")
-                self.stroke_pixels_drawn_this_stroke.add((px, py))
+                self._draw_preview_brush(px, py, tool == "eraser")
+                for brush_px, brush_py in self._get_brush_pixels(px, py):
+                    self.stroke_pixels_drawn_this_stroke.add((brush_px, brush_py))
 
     def draw(self, event):
         if not self.drawing or self.eyedropper_mode:
@@ -1461,12 +1562,15 @@ class PixelArtApp:
                 for p_x, p_y in self._bresenham_line_pixels(
                     self.last_draw_pixel_x, self.last_draw_pixel_y, curr_px, curr_py
                 ):
-                    if (p_x, p_y) not in self.stroke_pixels_drawn_this_stroke:
-                        self.stroke_pixels_drawn_this_stroke.add((p_x, p_y))
-                        self._draw_preview_rect(p_x, p_y, is_eraser)
-            elif (curr_px, curr_py) not in self.stroke_pixels_drawn_this_stroke:
-                self.stroke_pixels_drawn_this_stroke.add((curr_px, curr_py))
-                self._draw_preview_rect(curr_px, curr_py, is_eraser)
+                    for brush_px, brush_py in self._get_brush_pixels(p_x, p_y):
+                        if (
+                            brush_px,
+                            brush_py,
+                        ) not in self.stroke_pixels_drawn_this_stroke:
+                            self.stroke_pixels_drawn_this_stroke.add(
+                                (brush_px, brush_py)
+                            )
+                            self._draw_preview_rect(brush_px, brush_py, is_eraser)
             self.last_draw_pixel_x, self.last_draw_pixel_y = curr_px, curr_py
 
     def stop_draw(self, event):
@@ -1608,7 +1712,11 @@ class PixelArtApp:
         self.canvas.config(cursor=self.original_cursor_before_pan)
 
     def change_tool(self):
-        self.current_tool = self.tool_var.get()
+        new_tool = self.tool_var.get()
+        if self.current_tool != "eraser":
+            self.last_used_tool = self.current_tool
+        self.current_tool = new_tool
+
         if self.eyedropper_mode:
             self.toggle_eyedropper()
         if self.current_tool != "shape" and self.preview_shape_item:
@@ -1617,6 +1725,7 @@ class PixelArtApp:
             self.start_shape_point = None
             self.drawing = False
         self._update_shape_controls_state()
+        self._update_brush_controls_state()
 
     def toggle_eyedropper(self):
         self.eyedropper_mode = not self.eyedropper_mode
@@ -1687,8 +1796,19 @@ class PixelArtApp:
 
         def from_rgb_input(e=None):
             try:
+                r_val = int(r_var.get() or 0)
+                g_val = int(g_var.get() or 0)
+                b_val = int(b_var.get() or 0)
+
+                if r_val > 255:
+                    r_var.set("255")
+                if g_val > 255:
+                    g_var.set("255")
+                if b_val > 255:
+                    b_var.set("255")
+
                 state["hex"] = self._rgb_to_hex(
-                    *(int(v.get() or 0) for v in [r_var, g_var, b_var])
+                    min(255, r_val), min(255, g_val), min(255, b_val)
                 )
                 update_ui("rgb")
             except (ValueError, tk.TclError):
@@ -1708,7 +1828,7 @@ class PixelArtApp:
         ttk.Label(inputs_frame, text="RGB:", width=5).grid(
             row=1, column=0, sticky="w", pady=(5, 0), padx=(0, 5)
         )
-        vcmd = (self.root.register(self.validate_rgb_input), "%P")
+        vcmd = (self.root.register(lambda v: v == "" or v.isdigit()), "%P")
         r_e = ttk.Entry(
             inputs_frame,
             textvariable=r_var,
