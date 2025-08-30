@@ -9,6 +9,7 @@ import re
 import copy
 
 from tkinterdnd2 import DND_FILES, TkinterDnD
+from color_wheel_picker import ColorWheelPicker
 
 
 class Layer:
@@ -226,201 +227,6 @@ class MergeLayerAction(Action):
         app.active_layer_index = self.upper_layer_index - 1
 
 
-class ColorWheelPicker(ttk.Frame):
-    def __init__(self, parent, color_change_callback):
-        super().__init__(parent)
-        self.pack(pady=5)
-        self.color_change_callback = color_change_callback
-
-        self.hue, self.saturation, self.value = 0.0, 0.0, 0.0
-        self.indicator_radius, self.sv_indicator_radius = 6, 9
-        self.drag_mode = None
-
-        canvas_size = 150
-        self.sv_box_size = 72
-        self.sv_box_offset = (canvas_size - self.sv_box_size) / 2
-
-        self.color_canvas = tk.Canvas(
-            self, width=canvas_size, height=canvas_size, highlightthickness=0
-        )
-        self.color_canvas.pack()
-
-        self.create_hue_wheel()
-
-        hue_angle, wheel_radius, canvas_center = 0.0, 63.75, 75
-        hue_indicator_x = canvas_center + wheel_radius * math.cos(hue_angle)
-        hue_indicator_y = canvas_center + wheel_radius * math.sin(hue_angle)
-        self.hue_indicator = self.color_canvas.create_oval(
-            hue_indicator_x - self.indicator_radius,
-            hue_indicator_y - self.indicator_radius,
-            hue_indicator_x + self.indicator_radius,
-            hue_indicator_y + self.indicator_radius,
-            fill="white",
-            outline="black",
-            width=1,
-            tags=("hue_indicator",),
-        )
-
-        sv_x = self.sv_box_offset + self.saturation * (self.sv_box_size - 1)
-        sv_y = self.sv_box_offset + (1.0 - self.value) * (self.sv_box_size - 1)
-        r = self.sv_indicator_radius
-        self.sv_indicator = self.color_canvas.create_oval(
-            sv_x - r,
-            sv_y - r,
-            sv_x + r,
-            sv_y + r,
-            fill="white",
-            outline="black",
-            width=1,
-            tags=("sv_indicator",),
-        )
-
-        self.update_sv_box()
-        self.update_color_display()
-
-        for tag in ["hue_area", "hue_indicator"]:
-            self.color_canvas.tag_bind(tag, "<Button-1>", self.start_hue_drag)
-        for tag in ["sv_area", "sv_indicator"]:
-            self.color_canvas.tag_bind(tag, "<Button-1>", self.start_sv_drag)
-        self.color_canvas.bind("<B1-Motion>", self.on_canvas_drag)
-        self.color_canvas.bind("<ButtonRelease-1>", self.stop_drag)
-
-    def _hex_to_rgb(self, hex_color_str):
-        h = hex_color_str.lstrip("#")
-        if len(h) != 6:
-            return (0, 0, 0)
-        try:
-            return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))
-        except ValueError:
-            return (0, 0, 0)
-
-    def set_color(self, hex_color):
-        if not hex_color or not hex_color.startswith("#"):
-            return
-        r, g, b = self._hex_to_rgb(hex_color)
-        self.hue, self.saturation, self.value = colorsys.rgb_to_hsv(
-            r / 255.0, g / 255.0, b / 255.0
-        )
-        self.update_sv_box()
-
-        angle, radius, center_x, center_y = self.hue * 2 * math.pi, 63.75, 75, 75
-        indicator_x = center_x + radius * math.cos(angle)
-
-        indicator_y = center_y - radius * math.sin(angle)
-        r_hue = self.indicator_radius
-        self.color_canvas.coords(
-            self.hue_indicator,
-            indicator_x - r_hue,
-            indicator_y - r_hue,
-            indicator_x + r_hue,
-            indicator_y + r_hue,
-        )
-
-        sv_x = self.sv_box_offset + self.saturation * (self.sv_box_size - 1)
-        sv_y = self.sv_box_offset + (1.0 - self.value) * (self.sv_box_size - 1)
-        r_sv = self.sv_indicator_radius
-        self.color_canvas.coords(
-            self.sv_indicator, sv_x - r_sv, sv_y - r_sv, sv_x + r_sv, sv_y + r_sv
-        )
-        self.update_color_display(run_callback=False)
-
-    def create_hue_wheel(self):
-        size = 150
-        radius = center_x = center_y = size // 2
-        image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        pixels = image.load()
-        for y in range(size):
-            for x in range(size):
-                dx, dy = x - center_x, y - center_y
-                if radius * 0.7 < math.sqrt(dx**2 + dy**2) < radius:
-                    hue = (math.atan2(-dy, dx) / (2 * math.pi)) % 1.0
-                    rgb_float = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
-                    pixels[x, y] = tuple(int(c * 255) for c in rgb_float) + (255,)
-        self.hue_wheel_image = ImageTk.PhotoImage(image)
-        self.color_canvas.create_image(
-            center_x, center_y, image=self.hue_wheel_image, tags="hue_area"
-        )
-
-    def update_sv_box(self):
-        self.color_canvas.delete("gradient")
-        size = self.sv_box_size
-        gradient_img = Image.new("RGB", (size, size))
-        pixels = gradient_img.load()
-        for y in range(size):
-            val = 1.0 - (y / (size - 1))
-            for x in range(size):
-                sat = x / (size - 1)
-                rgb_float = colorsys.hsv_to_rgb(self.hue, sat, val)
-                pixels[x, y] = tuple(int(c * 255) for c in rgb_float)
-        self.sv_image = ImageTk.PhotoImage(gradient_img)
-        self.color_canvas.create_image(
-            self.sv_box_offset,
-            self.sv_box_offset,
-            anchor=tk.NW,
-            image=self.sv_image,
-            tags=("sv_area", "gradient"),
-        )
-        self.color_canvas.tag_raise("hue_indicator")
-        self.color_canvas.tag_raise("sv_indicator")
-
-    def start_hue_drag(self, event):
-        self.drag_mode = "hue"
-        self.update_hue(event.x, event.y)
-
-    def start_sv_drag(self, event):
-        self.drag_mode = "sv"
-        self.update_sv(event.x, event.y)
-
-    def stop_drag(self, event):
-        self.drag_mode = None
-
-    def on_canvas_drag(self, event):
-        if self.drag_mode == "hue":
-            self.update_hue(event.x, event.y)
-        elif self.drag_mode == "sv":
-            self.update_sv(event.x, event.y)
-
-    def update_hue(self, x, y):
-        center_x, center_y = 75, 75
-        dx, dy = x - center_x, y - center_y
-        if dx == 0 and dy == 0:
-            return
-        angle = math.atan2(-dy, dx)
-        self.hue = (angle / (2 * math.pi)) % 1.0
-        self.update_sv_box()
-        self.update_color_display()
-        indicator_x = center_x + 63.75 * math.cos(angle)
-        indicator_y = center_y - 63.75 * math.sin(angle)
-        r = self.indicator_radius
-        self.color_canvas.coords(
-            self.hue_indicator,
-            indicator_x - r,
-            indicator_y - r,
-            indicator_x + r,
-            indicator_y + r,
-        )
-
-    def update_sv(self, x, y):
-        x = max(self.sv_box_offset, min(x, self.sv_box_offset + self.sv_box_size - 1))
-        y = max(self.sv_box_offset, min(y, self.sv_box_offset + self.sv_box_size - 1))
-        self.saturation = max(
-            0.0, min(1.0, (x - self.sv_box_offset) / (self.sv_box_size - 1))
-        )
-        self.value = max(
-            0.0, min(1.0, 1.0 - (y - self.sv_box_offset) / (self.sv_box_size - 1))
-        )
-        self.update_color_display()
-        r = self.sv_indicator_radius
-        self.color_canvas.coords(self.sv_indicator, x - r, y - r, x + r, y + r)
-
-    def update_color_display(self, run_callback=True):
-        rgb_float = colorsys.hsv_to_rgb(self.hue, self.saturation, self.value)
-        rgb_int = tuple(int(c * 255) for c in rgb_float)
-        hex_color = f"#{rgb_int [0 ]:02x}{rgb_int [1 ]:02x}{rgb_int [2 ]:02x}"
-        if run_callback:
-            self.color_change_callback(hex_color)
-
-
 class PixelArtApp:
     def __init__(self, root):
         self.root = root
@@ -443,7 +249,7 @@ class PixelArtApp:
         self.current_color, self.current_alpha = "#000000", 255
         self.drawing, self.current_tool, self.eyedropper_mode = False, "pencil", False
         self.last_used_tool = "pencil"
-        self._updating_color_inputs, self.mmb_eyedropper_active = False, False
+        self.mmb_eyedropper_active = False
         self.panning = False
         self.original_cursor_before_mmb, self.original_cursor_before_pan = "", ""
         self.current_filename = None
@@ -460,7 +266,6 @@ class PixelArtApp:
         self.last_draw_pixel_x, self.last_draw_pixel_y = None, None
         self.stroke_pixels_drawn_this_stroke = set()
         self.start_shape_point, self.preview_shape_item = None, None
-        self.color_preview_image_tk = None
 
         self.show_canvas_background_var = tk.BooleanVar(value=False)
         self.save_background_var = tk.BooleanVar(value=False)
@@ -487,7 +292,7 @@ class PixelArtApp:
         self.create_canvas()
         self._update_shape_controls_state()
         self._update_brush_controls_state()
-        self.update_inputs_from_current_color()
+        self._update_color_picker_from_app_state()
         self._update_history_controls()
         self._update_save_background_menu_state()
 
@@ -714,52 +519,6 @@ class PixelArtApp:
         dialog.bind("<Return>", lambda e: apply_resize())
         dialog.bind("<Escape>", lambda e: dialog.destroy())
 
-    def create_transparent_color_preview(self, parent_frame, width=60, height=40):
-        return tk.Canvas(
-            parent_frame,
-            width=width,
-            height=height,
-            relief=tk.SUNKEN,
-            bd=2,
-            highlightthickness=0,
-        )
-
-    def update_color_preview(self):
-        if not hasattr(self, "color_preview_canvas"):
-            return
-        width, height = (
-            self.color_preview_canvas.winfo_width(),
-            self.color_preview_canvas.winfo_height(),
-        )
-        if width <= 1 or height <= 1:
-            self.root.after(50, self.update_color_preview)
-            return
-        checker_size = 6
-        bg_img = Image.new("RGBA", (width, height))
-        draw_bg = ImageDraw.Draw(bg_img)
-        for y_bg in range(0, height, checker_size):
-            for x_bg in range(0, width, checker_size):
-                fill_c = (
-                    (224, 224, 224, 255)
-                    if (x_bg // checker_size + y_bg // checker_size) % 2
-                    else (245, 245, 245, 255)
-                )
-                draw_bg.rectangle(
-                    [x_bg, y_bg, x_bg + checker_size, y_bg + checker_size], fill=fill_c
-                )
-        try:
-            r, g, b = self._hex_to_rgb(self.current_color)
-            a = self.current_alpha
-        except ValueError:
-            r, g, b, a = 0, 0, 0, 255
-        overlay_img = Image.new("RGBA", (width, height), (r, g, b, a))
-        final_img = Image.alpha_composite(bg_img, overlay_img)
-        self.color_preview_image_tk = ImageTk.PhotoImage(final_img)
-        self.color_preview_canvas.delete("all")
-        self.color_preview_canvas.create_image(
-            0, 0, image=self.color_preview_image_tk, anchor="nw"
-        )
-
     def on_window_resize(self, event):
         if event.widget == self.root:
             if self._after_id_resize:
@@ -867,7 +626,8 @@ class PixelArtApp:
         )
         self.brush_size_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.brush_size_slider.bind(
-            "<Button-1>", lambda e: self._on_slider_click(e, self.brush_size_slider)
+            "<Button-1>",
+            lambda e: ColorWheelPicker.handle_slider_click(e, self.brush_size_slider),
         )
 
         self.brush_size_label = ttk.Label(
@@ -880,97 +640,12 @@ class PixelArtApp:
 
         color_frame = ttk.LabelFrame(left_panel, text="Color Picker", padding=10)
         color_frame.pack(fill=tk.X, pady=(0, 10))
-        preview_container = ttk.Frame(color_frame)
-        preview_container.pack()
-        self.color_preview_canvas = self.create_transparent_color_preview(
-            preview_container, width=120, height=30
-        )
-        self.color_preview_canvas.pack()
-        self.color_wheel = ColorWheelPicker(color_frame, self._on_color_wheel_change)
 
-        color_inputs_frame = ttk.Frame(color_frame)
-        color_inputs_frame.pack(pady=(10, 0))
-        self.hex_var, self.r_var, self.g_var, self.b_var = (
-            tk.StringVar(),
-            tk.StringVar(),
-            tk.StringVar(),
-            tk.StringVar(),
+        self.color_wheel = ColorWheelPicker(
+            color_frame, self._on_color_wheel_change, show_alpha=True, show_preview=True
         )
-        ttk.Label(color_inputs_frame, text="HEX:", width=5).grid(
-            row=0, column=0, padx=(0, 5), sticky="w"
-        )
-        hex_entry = ttk.Entry(color_inputs_frame, textvariable=self.hex_var, width=10)
-        hex_entry.grid(row=0, column=1, columnspan=3, sticky="we")
-        hex_entry.bind("<KeyRelease>", self.on_hex_input)
-        hex_entry.bind("<FocusOut>", self.on_hex_input)
+        self.color_wheel.pack()
 
-        ttk.Label(color_inputs_frame, text="RGB:", width=5).grid(
-            row=1, column=0, padx=(0, 5), pady=(5, 0), sticky="w"
-        )
-        digit_only_vcmd = (self.root.register(lambda v: v == "" or v.isdigit()), "%P")
-        r_entry = ttk.Entry(
-            color_inputs_frame,
-            textvariable=self.r_var,
-            width=4,
-            validate="key",
-            validatecommand=digit_only_vcmd,
-        )
-        r_entry.grid(row=1, column=1, pady=(5, 0), sticky="w")
-        g_entry = ttk.Entry(
-            color_inputs_frame,
-            textvariable=self.g_var,
-            width=4,
-            validate="key",
-            validatecommand=digit_only_vcmd,
-        )
-        g_entry.grid(row=1, column=2, pady=(5, 0), sticky="w")
-        b_entry = ttk.Entry(
-            color_inputs_frame,
-            textvariable=self.b_var,
-            width=4,
-            validate="key",
-            validatecommand=digit_only_vcmd,
-        )
-        b_entry.grid(row=1, column=3, pady=(5, 0), sticky="w")
-        for entry in [r_entry, g_entry, b_entry]:
-            entry.bind("<KeyRelease>", self.on_rgb_input)
-            entry.bind("<FocusOut>", self.on_rgb_input_focus_out)
-
-        alpha_frame = ttk.Frame(color_frame)
-        alpha_frame.pack(fill=tk.X, pady=(10, 0))
-        self.alpha_var = tk.StringVar(value="255")
-        ttk.Label(alpha_frame, text="A:", width=2).pack(side=tk.LEFT, padx=(0, 5))
-        alpha_entry = ttk.Entry(
-            alpha_frame,
-            textvariable=self.alpha_var,
-            width=6,
-            validate="key",
-            validatecommand=digit_only_vcmd,
-        )
-        alpha_entry.pack(side=tk.LEFT, padx=(0, 10))
-        alpha_entry.bind("<KeyRelease>", self.on_alpha_entry_change)
-        alpha_entry.bind("<FocusOut>", self.on_alpha_entry_focus_out)
-        self.alpha_slider = tk.Scale(
-            alpha_frame,
-            from_=0,
-            to=255,
-            orient=tk.HORIZONTAL,
-            showvalue=0,
-            command=self.on_alpha_slider_change,
-            bg="#A0A0A0",
-            troughcolor="#E0E0E0",
-            activebackground="#606060",
-            sliderrelief=tk.RAISED,
-            width=15,
-            sliderlength=20,
-            highlightthickness=0,
-            bd=0,
-        )
-        self.alpha_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.alpha_slider.bind(
-            "<Button-1>", lambda e: self._on_slider_click(e, self.alpha_slider)
-        )
-        self.alpha_slider.set(self.current_alpha)
         ttk.Button(
             color_frame, text="Pick Color (Eyedropper)", command=self.toggle_eyedropper
         ).pack(pady=10)
@@ -1325,110 +1000,13 @@ class PixelArtApp:
         if messagebox.askyesno("Open Dropped File", prompt_message, parent=self.root):
             self._load_image_from_path(filepath)
 
-    def _on_color_wheel_change(self, new_hex_color):
+    def _on_color_wheel_change(self, new_hex_color, new_alpha):
+
         if self.current_tool == "eraser":
             self.tool_var.set(self.last_used_tool)
             self.change_tool()
         self.current_color = new_hex_color
-        self.update_inputs_from_current_color(source="wheel")
-        self.update_color_preview()
-
-    def on_hex_input(self, event):
-        if self._updating_color_inputs:
-            return
-        hex_val = self.hex_var.get().lstrip("#")
-        if len(hex_val) > 6:
-            hex_val = hex_val[:6]
-            self.hex_var.set(hex_val)
-        if re.fullmatch(r"[0-9a-fA-F]{6}", hex_val):
-            new_color = f"#{hex_val .lower ()}"
-            if self.current_color != new_color:
-                self.current_color = new_color
-                self.update_inputs_from_current_color(source="hex")
-
-    def on_rgb_input(self, event=None):
-        if self._updating_color_inputs:
-            return
-        for var in [self.r_var, self.g_var, self.b_var]:
-            try:
-                val_str = var.get()
-                if val_str and int(val_str) > 255:
-                    var.set("255")
-            except (ValueError, tk.TclError):
-                pass
-        try:
-            r = int(self.r_var.get() or 0)
-            g = int(self.g_var.get() or 0)
-            b = int(self.b_var.get() or 0)
-            new_color = self._rgb_to_hex(r, g, b)
-            if self.current_color != new_color:
-                self.current_color = new_color
-                self.update_inputs_from_current_color(source="rgb")
-        except (ValueError, tk.TclError):
-            pass
-
-    def on_rgb_input_focus_out(self, event):
-        if self._updating_color_inputs:
-            return
-        try:
-            for var in [self.r_var, self.g_var, self.b_var]:
-                if not var.get():
-                    var.set("0")
-        except tk.TclError:
-            pass
-        self.on_rgb_input()
-
-    def on_alpha_entry_change(self, event):
-        try:
-            value_str = self.alpha_var.get()
-            if not value_str:
-                return
-            num = int(value_str)
-            if num > 255:
-                self.alpha_var.set("255")
-                event.widget.icursor(tk.END)
-            elif num < 0:
-                self.alpha_var.set("0")
-                event.widget.icursor(tk.END)
-            self.current_alpha = int(self.alpha_var.get())
-            if self.alpha_slider.get() != self.current_alpha:
-                self.alpha_slider.set(self.current_alpha)
-            self.update_color_preview()
-        except ValueError:
-            pass
-
-    def on_alpha_entry_focus_out(self, event):
-        try:
-            val_str = self.alpha_var.get()
-            self.alpha_var.set(
-                "255" if not val_str else str(max(0, min(255, int(val_str))))
-            )
-            self.current_alpha = int(self.alpha_var.get())
-            self.alpha_slider.set(self.current_alpha)
-        except (ValueError, tk.TclError):
-            self.alpha_var.set("255")
-            self.alpha_slider.set(255)
-            self.current_alpha = 255
-        self.update_color_preview()
-
-    def on_alpha_slider_change(self, value):
-        val_int_str = str(int(float(value)))
-        self.current_alpha = int(val_int_str)
-        if self.alpha_var.get() != val_int_str:
-            self.alpha_var.set(val_int_str)
-        self.update_color_preview()
-
-    def _on_slider_click(self, event, slider):
-        element = slider.identify(event.x, event.y)
-        if element not in ("trough1", "trough2"):
-            return
-        click_pos, widget_size = event.x, slider.winfo_width()
-        if widget_size == 0:
-            return
-        from_, to = float(slider.cget("from")), float(slider.cget("to"))
-        value_range = to - from_
-        fraction = max(0.0, min(1.0, click_pos / widget_size))
-        slider.set(from_ + (fraction * value_range))
+        self.current_alpha = new_alpha
 
     def on_brush_size_change(self, value):
         self.brush_size = self.brush_size_var.get()
@@ -1562,26 +1140,13 @@ class PixelArtApp:
         self.brush_size_slider.config(state=new_state)
         self.brush_size_label.config(state=new_state)
 
-    def update_inputs_from_current_color(self, source=None):
-        if not self.current_color or not hasattr(self, "color_wheel"):
+    def _update_color_picker_from_app_state(self):
+
+        if not hasattr(self, "color_wheel"):
             return
-        self._updating_color_inputs = True
-        if source != "wheel":
-            self.color_wheel.set_color(self.current_color)
-        if source != "rgb":
-            r, g, b = self._hex_to_rgb(self.current_color)
-            self.r_var.set(str(r))
-            self.g_var.set(str(g))
-            self.b_var.set(str(b))
-        if source != "hex":
-            self.hex_var.set(self.current_color.lstrip("#"))
-        alpha_str = str(self.current_alpha)
-        if self.alpha_var.get() != alpha_str:
-            self.alpha_var.set(alpha_str)
-        if self.alpha_slider.get() != self.current_alpha:
-            self.alpha_slider.set(self.current_alpha)
-        self.update_color_preview()
-        self._updating_color_inputs = False
+        self.color_wheel.set_color(
+            self.current_color, self.current_alpha, run_callback=False
+        )
 
     def create_canvas(self):
         self.canvas.delete("all")
@@ -2207,7 +1772,7 @@ class PixelArtApp:
                 color, alpha = pixel_data
                 if alpha > 0:
                     self.current_color, self.current_alpha = color, alpha
-                    self.update_inputs_from_current_color()
+                    self._update_color_picker_from_app_state()
                     return True
         return False
 
@@ -2275,120 +1840,25 @@ class PixelArtApp:
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.resizable(False, False)
-        dialog.geometry(
-            f"250x360+{self .root .winfo_x ()+(self .root .winfo_width ()-250 )//2 }+{self .root .winfo_y ()+(self .root .winfo_height ()-360 )//2 }"
-        )
+
+        dialog.geometry("250x325")
+
         main_frame = ttk.Frame(dialog, padding=15)
         main_frame.pack(fill=tk.BOTH, expand=True)
-        state = {"hex": self.canvas_bg_color, "updating": False}
-        hex_var, r_var, g_var, b_var = (
-            tk.StringVar(),
-            tk.StringVar(),
-            tk.StringVar(),
-            tk.StringVar(),
-        )
-        preview = tk.Label(main_frame, relief="sunken", height=2)
-        preview.pack(pady=(0, 15), fill=tk.X)
+        state = {"hex": self.canvas_bg_color}
 
-        def update_ui(source=None):
-            if state["updating"]:
-                return
-            state["updating"] = True
-            preview.config(bg=state["hex"])
-            if source != "wheel":
-                color_wheel.set_color(state["hex"])
-            if source != "hex":
-                hex_var.set(state["hex"].lstrip("#"))
-            if source != "rgb":
-                r, g, b = self._hex_to_rgb(state["hex"])
-                r_var.set(str(r))
-                g_var.set(str(g))
-                b_var.set(str(b))
-            state["updating"] = False
-
-        def from_wheel(new_hex):
+        def on_dialog_color_change(new_hex, _):
             state["hex"] = new_hex
-            update_ui("wheel")
 
-        color_wheel = ColorWheelPicker(main_frame, from_wheel)
+        color_wheel = ColorWheelPicker(
+            main_frame, on_dialog_color_change, show_alpha=False, show_preview=True
+        )
+
+        color_wheel.set_color(self.canvas_bg_color)
         color_wheel.pack()
-        inputs_frame = ttk.Frame(main_frame)
-        inputs_frame.pack(pady=(15, 0))
 
-        def from_hex_input(e):
-            hex_val = hex_var.get().lstrip("#")
-            if len(hex_val) > 6:
-                hex_val = hex_val[:6]
-                hex_var.set(hex_val)
-            if re.fullmatch(r"[0-9a-fA-F]{6}", hex_val):
-                state["hex"] = f"#{hex_val .lower ()}"
-                update_ui("hex")
-
-        def from_rgb_input(e=None):
-            try:
-                r, g, b = (
-                    int(r_var.get() or 0),
-                    int(g_var.get() or 0),
-                    int(b_var.get() or 0),
-                )
-                if r > 255:
-                    r_var.set("255")
-                if g > 255:
-                    g_var.set("255")
-                if b > 255:
-                    b_var.set("255")
-                state["hex"] = self._rgb_to_hex(min(255, r), min(255, g), min(255, b))
-                update_ui("rgb")
-            except (ValueError, tk.TclError):
-                pass
-
-        def on_rgb_focus_out(e):
-            for v in [r_var, g_var, b_var]:
-                if not v.get():
-                    v.set("0")
-            from_rgb_input()
-
-        ttk.Label(inputs_frame, text="HEX:", width=5).grid(
-            row=0, column=0, sticky="w", padx=(0, 5)
-        )
-        hex_entry = ttk.Entry(inputs_frame, textvariable=hex_var, width=12)
-        hex_entry.grid(row=0, column=1, columnspan=3, sticky="we")
-        hex_entry.bind("<KeyRelease>", from_hex_input)
-        hex_entry.bind("<FocusOut>", from_hex_input)
-        ttk.Label(inputs_frame, text="RGB:", width=5).grid(
-            row=1, column=0, sticky="w", pady=(5, 0), padx=(0, 5)
-        )
-        vcmd = (self.root.register(lambda v: v == "" or v.isdigit()), "%P")
-        r_e = ttk.Entry(
-            inputs_frame,
-            textvariable=r_var,
-            width=4,
-            validate="key",
-            validatecommand=vcmd,
-        )
-        r_e.grid(row=1, column=1, pady=(5, 0), sticky="w")
-        g_e = ttk.Entry(
-            inputs_frame,
-            textvariable=g_var,
-            width=4,
-            validate="key",
-            validatecommand=vcmd,
-        )
-        g_e.grid(row=1, column=2, pady=(5, 0), sticky="w")
-        b_e = ttk.Entry(
-            inputs_frame,
-            textvariable=b_var,
-            width=4,
-            validate="key",
-            validatecommand=vcmd,
-        )
-        b_e.grid(row=1, column=3, pady=(5, 0), sticky="w")
-        for e in [r_e, g_e, b_e]:
-            e.bind("<KeyRelease>", from_rgb_input)
-            e.bind("<FocusOut>", on_rgb_focus_out)
-
-        button_frame = ttk.Frame(dialog)
-        button_frame.pack(pady=(10, 15), side=tk.BOTTOM)
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(side=tk.BOTTOM, pady=(15, 0))
 
         def apply_choice():
             if self.canvas_bg_color != state["hex"]:
@@ -2399,14 +1869,13 @@ class PixelArtApp:
                     self._update_visible_canvas_image()
             dialog.destroy()
 
-        ttk.Button(
-            button_frame, text="OK", command=apply_choice, style="Accent.TButton"
-        ).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="OK", command=apply_choice).pack(
+            side=tk.LEFT, padx=5
+        )
         ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(
             side=tk.LEFT, padx=5
         )
-        state["hex"] = self.canvas_bg_color
-        update_ui()
+
         dialog.bind("<Return>", lambda e: apply_choice())
         dialog.bind("<Escape>", lambda e: dialog.destroy())
 
