@@ -326,8 +326,6 @@ class PixelCanvas(ttk.Frame):
             return
         self.app.pixel_size = new_pixel_size
         self._update_canvas_scaling()
-        if self.drawing:
-            self.app.on_canvas_motion_1(event)
         pixel_x_at_cursor, pixel_y_at_cursor = (
             current_canvas_x / old_pixel_size,
             current_canvas_y / old_pixel_size,
@@ -355,6 +353,18 @@ class PixelCanvas(ttk.Frame):
                     )
             except (ValueError, IndexError):
                 pass
+
+        if self.drawing:
+
+            self.app.on_canvas_motion_1(event)
+
+            self.canvas.delete("preview_stroke")
+
+            tool_options = self.app._get_tool_options()
+            is_eraser = tool_options["tool"] == "eraser"
+            for px, py in self.stroke_pixels_drawn_this_stroke:
+                self._draw_preview_rect(px, py, is_eraser, tool_options)
+
         if self.panning:
             self.canvas.scan_mark(event.x, event.y)
         self._update_visible_canvas_image()
@@ -405,6 +415,37 @@ class PixelCanvas(ttk.Frame):
                     if 0 <= px < self.app.canvas_width:
                         yield (px, py)
 
+    def _get_composite_pixel_color_under_layer(self, x, y, layer_index):
+
+        if self.app.show_canvas_background_var.get():
+            bg_rgb = hex_to_rgb(self.app.canvas_bg_color)
+        else:
+            bg_rgb = (224, 224, 224) if (x + y) % 2 == 0 else (240, 240, 240)
+
+        composite_rgb = bg_rgb
+
+        for i in range(layer_index):
+            layer = self.app.layers[i]
+            if not layer.visible:
+                continue
+
+            pixel_data = layer.pixel_data.get((x, y))
+            if pixel_data:
+                hex_color, alpha = pixel_data
+                if alpha > 0:
+                    alpha_to_use = alpha
+                    if not self.app.render_pixel_alpha_var.get():
+                        alpha_to_use = 255
+
+                    if alpha_to_use > 0:
+                        fg_rgb = hex_to_rgb(hex_color)
+                        alpha_norm = alpha_to_use / 255.0
+                        composite_rgb = tuple(
+                            fg_rgb[c] * alpha_norm + composite_rgb[c] * (1 - alpha_norm)
+                            for c in range(3)
+                        )
+        return composite_rgb
+
     def _draw_preview_rect(self, x, y, is_eraser, tool_options):
         if x is None or y is None:
             return
@@ -414,70 +455,71 @@ class PixelCanvas(ttk.Frame):
             (x + 1) * self.app.pixel_size,
             (y + 1) * self.app.pixel_size,
         )
-        ultimate_bg_rgb = (
-            hex_to_rgb(self.app.canvas_bg_color)
-            if self.app.show_canvas_background_var.get()
-            else ((224, 224, 224) if (x + y) % 2 == 0 else (240, 240, 240))
-        )
+        active_layer_index = tool_options["active_layer_index"]
+
+        base_rgb = self._get_composite_pixel_color_under_layer(x, y, active_layer_index)
+
+        applied_hex, applied_alpha = None, 0
+        outline_color, outline_width = "", 0
+
         if is_eraser:
-            self.canvas.create_rectangle(
-                x0,
-                y0,
-                x1,
-                y1,
-                fill=rgb_to_hex(*ultimate_bg_rgb),
-                outline="#000000",
-                width=1,
-                tags="preview_stroke",
-            )
-            return
-        fg_rgb, fg_a_norm = (
-            hex_to_rgb(tool_options["color"]),
-            tool_options["alpha"] / 255.0,
-        )
-        if fg_a_norm == 1.0:
-            self.canvas.create_rectangle(
-                x0,
-                y0,
-                x1,
-                y1,
-                fill=tool_options["color"],
-                outline="",
-                tags="preview_stroke",
-            )
-            return
-        existing, blending = (
-            tool_options["active_layer_data"].get((x, y)),
-            self.app.color_blending_var.get(),
-        )
-        if not blending or not existing:
-            base_rgb = ultimate_bg_rgb
+            outline_color, outline_width = "#000000", 1
+            applied_alpha = 0
         else:
-            bg_hex, bg_a_int = existing
-            bg_rgb, bg_a_norm = hex_to_rgb(bg_hex), (
-                (bg_a_int / 255.0) if self.app.render_pixel_alpha_var.get() else 1.0
+            source_hex, source_alpha = tool_options["color"], tool_options["alpha"]
+            applied_hex, applied_alpha = source_hex, source_alpha
+            existing_pixel = tool_options["active_layer_data"].get((x, y))
+            if (
+                self.app.color_blending_var.get()
+                and 0 < source_alpha < 255
+                and existing_pixel
+                and existing_pixel[1] > 0
+            ):
+                bg_hex, bg_a_int = existing_pixel
+                applied_hex, applied_alpha = blend_colors(
+                    source_hex, source_alpha, bg_hex, bg_a_int
+                )
+
+        composite_rgb = base_rgb
+        if applied_alpha > 0:
+            alpha_to_use = (
+                applied_alpha if self.app.render_pixel_alpha_var.get() else 255
             )
-            r, g, b = (
-                bg_rgb[0] * bg_a_norm + ultimate_bg_rgb[0] * (1.0 - bg_a_norm),
-                bg_rgb[1] * bg_a_norm + ultimate_bg_rgb[1] * (1.0 - bg_a_norm),
-                bg_rgb[2] * bg_a_norm + ultimate_bg_rgb[2] * (1.0 - bg_a_norm),
+            alpha_norm = alpha_to_use / 255.0
+            applied_rgb = hex_to_rgb(applied_hex)
+            composite_rgb = tuple(
+                applied_rgb[c] * alpha_norm + base_rgb[c] * (1.0 - alpha_norm)
+                for c in range(3)
             )
-            base_rgb = (r, g, b)
-        r_out, g_out, b_out = (
-            fg_rgb[0] * fg_a_norm + base_rgb[0] * (1.0 - fg_a_norm),
-            fg_rgb[1] * fg_a_norm + base_rgb[1] * (1.0 - fg_a_norm),
-            fg_rgb[2] * fg_a_norm + base_rgb[2] * (1.0 - fg_a_norm),
-        )
-        final_rgb = tuple(
-            min(255, max(0, int(round(c)))) for c in (r_out, g_out, b_out)
-        )
+
+        final_rgb = composite_rgb
+        for i in range(active_layer_index + 1, len(self.app.layers)):
+            layer = self.app.layers[i]
+            if not layer.visible:
+                continue
+            pixel_above_data = layer.pixel_data.get((x, y))
+            if pixel_above_data and pixel_above_data[1] > 0:
+                hex_above, alpha_above = pixel_above_data
+                alpha_to_use = (
+                    alpha_above if self.app.render_pixel_alpha_var.get() else 255
+                )
+                if alpha_to_use > 0:
+                    alpha_norm = alpha_to_use / 255.0
+                    rgb_above = hex_to_rgb(hex_above)
+                    final_rgb = tuple(
+                        rgb_above[c] * alpha_norm + final_rgb[c] * (1.0 - alpha_norm)
+                        for c in range(3)
+                    )
+
+        final_rgb_int = tuple(min(255, max(0, int(round(c)))) for c in final_rgb)
         self.canvas.create_rectangle(
             x0,
             y0,
             x1,
             y1,
-            fill=rgb_to_hex(*final_rgb),
-            outline="",
+            fill=rgb_to_hex(*final_rgb_int),
+            outline=outline_color,
+            width=outline_width,
             tags="preview_stroke",
         )
 
