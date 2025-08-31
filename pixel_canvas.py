@@ -2,12 +2,15 @@ import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageTk, ImageDraw
 import math
+from collections import defaultdict
 
 from actions import PixelAction
 from utilities import blend_colors, bresenham_line, hex_to_rgb, rgb_to_hex
 
 
 class PixelCanvas(ttk.Frame):
+    CHUNK_SIZE = 32
+
     def __init__(self, master, app_instance, pick_color_callback):
         super().__init__(master)
         self.app = app_instance
@@ -29,6 +32,11 @@ class PixelCanvas(ttk.Frame):
         self.stroke_pixels_drawn_this_stroke = set()
         self.start_shape_point, self.preview_shape_item = None, None
 
+        self.preview_chunks = {}
+        self.new_preview_pixels = set()
+        self._after_id_preview_render = None
+        self.PREVIEW_RENDER_INTERVAL_MS = 10
+
         self._setup_widgets()
         self._bind_events()
 
@@ -49,7 +57,6 @@ class PixelCanvas(ttk.Frame):
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
     def _bind_events(self):
-
         self.canvas.bind("<Button-2>", self.start_mmb_eyedropper)
         self.canvas.bind("<B2-Motion>", self.mmb_eyedropper_motion)
         self.canvas.bind("<ButtonRelease-2>", self.stop_mmb_eyedropper)
@@ -355,15 +362,17 @@ class PixelCanvas(ttk.Frame):
                 pass
 
         if self.drawing:
-
             self.app.on_canvas_motion_1(event)
 
-            self.canvas.delete("preview_stroke")
+            for (cx, cy), chunk in self.preview_chunks.items():
+                canvas_x = cx * self.CHUNK_SIZE * self.app.pixel_size
+                canvas_y = cy * self.CHUNK_SIZE * self.app.pixel_size
+                self.canvas.coords(chunk["item"], canvas_x, canvas_y)
 
-            tool_options = self.app._get_tool_options()
-            is_eraser = tool_options["tool"] == "eraser"
-            for px, py in self.stroke_pixels_drawn_this_stroke:
-                self._draw_preview_rect(px, py, is_eraser, tool_options)
+                final_w = self.CHUNK_SIZE * self.app.pixel_size
+                resized_img = chunk["pil"].resize((final_w, final_w), Image.NEAREST)
+                chunk["photo"] = ImageTk.PhotoImage(resized_img)
+                self.canvas.itemconfig(chunk["item"], image=chunk["photo"])
 
         if self.panning:
             self.canvas.scan_mark(event.x, event.y)
@@ -416,56 +425,35 @@ class PixelCanvas(ttk.Frame):
                         yield (px, py)
 
     def _get_composite_pixel_color_under_layer(self, x, y, layer_index):
-
         if self.app.show_canvas_background_var.get():
             bg_rgb = hex_to_rgb(self.app.canvas_bg_color)
         else:
             bg_rgb = (224, 224, 224) if (x + y) % 2 == 0 else (240, 240, 240)
 
         composite_rgb = bg_rgb
-
         for i in range(layer_index):
             layer = self.app.layers[i]
             if not layer.visible:
                 continue
-
             pixel_data = layer.pixel_data.get((x, y))
-            if pixel_data:
+            if pixel_data and pixel_data[1] > 0:
                 hex_color, alpha = pixel_data
-                if alpha > 0:
-                    alpha_to_use = alpha
-                    if not self.app.render_pixel_alpha_var.get():
-                        alpha_to_use = 255
-
-                    if alpha_to_use > 0:
-                        fg_rgb = hex_to_rgb(hex_color)
-                        alpha_norm = alpha_to_use / 255.0
-                        composite_rgb = tuple(
-                            fg_rgb[c] * alpha_norm + composite_rgb[c] * (1 - alpha_norm)
-                            for c in range(3)
-                        )
+                alpha_to_use = alpha if self.app.render_pixel_alpha_var.get() else 255
+                if alpha_to_use > 0:
+                    fg_rgb = hex_to_rgb(hex_color)
+                    alpha_norm = alpha_to_use / 255.0
+                    composite_rgb = tuple(
+                        fg_rgb[c] * alpha_norm + composite_rgb[c] * (1 - alpha_norm)
+                        for c in range(3)
+                    )
         return composite_rgb
 
-    def _draw_preview_rect(self, x, y, is_eraser, tool_options):
-        if x is None or y is None:
-            return
-        x0, y0, x1, y1 = (
-            x * self.app.pixel_size,
-            y * self.app.pixel_size,
-            (x + 1) * self.app.pixel_size,
-            (y + 1) * self.app.pixel_size,
-        )
+    def _calculate_preview_pixel_rgba(self, x, y, is_eraser, tool_options):
         active_layer_index = tool_options["active_layer_index"]
-
         base_rgb = self._get_composite_pixel_color_under_layer(x, y, active_layer_index)
-
         applied_hex, applied_alpha = None, 0
-        outline_color, outline_width = "", 0
 
-        if is_eraser:
-            outline_color, outline_width = "#000000", 1
-            applied_alpha = 0
-        else:
+        if not is_eraser:
             source_hex, source_alpha = tool_options["color"], tool_options["alpha"]
             applied_hex, applied_alpha = source_hex, source_alpha
             existing_pixel = tool_options["active_layer_data"].get((x, y))
@@ -512,24 +500,78 @@ class PixelCanvas(ttk.Frame):
                     )
 
         final_rgb_int = tuple(min(255, max(0, int(round(c)))) for c in final_rgb)
-        self.canvas.create_rectangle(
-            x0,
-            y0,
-            x1,
-            y1,
-            fill=rgb_to_hex(*final_rgb_int),
-            outline=outline_color,
-            width=outline_width,
-            tags="preview_stroke",
-        )
+        return final_rgb_int + (255,)
 
-    def _draw_preview_brush(self, center_x, center_y, is_eraser, tool_options):
-        for px, py in self._get_brush_pixels(
-            center_x, center_y, tool_options["brush_size"]
-        ):
-            self._draw_preview_rect(px, py, is_eraser, tool_options)
+    def _schedule_preview_render(self):
+        if self._after_id_preview_render is None:
+            self._after_id_preview_render = self.app.root.after(
+                self.PREVIEW_RENDER_INTERVAL_MS, self._render_preview_frame
+            )
+
+    def _render_preview_frame(self):
+        self._after_id_preview_render = None
+        if not self.drawing and not self.new_preview_pixels:
+            return
+
+        if not self.new_preview_pixels:
+            if self.drawing:
+                self._schedule_preview_render()
+            return
+
+        tool_options = self.app._get_tool_options()
+        is_eraser = tool_options["tool"] == "eraser"
+
+        dirty_chunks = defaultdict(list)
+        for px, py in self.new_preview_pixels:
+            cx, cy = px // self.CHUNK_SIZE, py // self.CHUNK_SIZE
+            dirty_chunks[(cx, cy)].append((px, py))
+        self.new_preview_pixels.clear()
+
+        for (cx, cy), pixels_in_chunk in dirty_chunks.items():
+            if (cx, cy) not in self.preview_chunks:
+
+                canvas_x = cx * self.CHUNK_SIZE * self.app.pixel_size
+                canvas_y = cy * self.CHUNK_SIZE * self.app.pixel_size
+                new_chunk = {
+                    "pil": Image.new("RGBA", (self.CHUNK_SIZE, self.CHUNK_SIZE)),
+                    "item": self.canvas.create_image(canvas_x, canvas_y, anchor="nw"),
+                    "photo": None,
+                }
+                self.preview_chunks[(cx, cy)] = new_chunk
+
+            chunk = self.preview_chunks[(cx, cy)]
+            pil_image = chunk["pil"]
+
+            for px, py in pixels_in_chunk:
+                rgba = self._calculate_preview_pixel_rgba(
+                    px, py, is_eraser, tool_options
+                )
+
+                img_x, img_y = px % self.CHUNK_SIZE, py % self.CHUNK_SIZE
+                pil_image.putpixel((img_x, img_y), rgba)
+
+            final_w = self.CHUNK_SIZE * self.app.pixel_size
+            if final_w > 0:
+                resized_img = pil_image.resize((final_w, final_w), Image.NEAREST)
+                chunk["photo"] = ImageTk.PhotoImage(resized_img)
+                self.canvas.itemconfig(chunk["item"], image=chunk["photo"])
+
+        if self.drawing:
+            self._schedule_preview_render()
+
+    def _cleanup_preview(self):
+        if self._after_id_preview_render:
+            self.app.root.after_cancel(self._after_id_preview_render)
+            self._after_id_preview_render = None
+
+        for chunk in self.preview_chunks.values():
+            self.canvas.delete(chunk["item"])
+
+        self.preview_chunks.clear()
+        self.new_preview_pixels.clear()
 
     def flood_fill(self, start_x, start_y, tool_options):
+
         active_layer_data = tool_options["active_layer_data"]
         new_color_hex, new_alpha = tool_options["color"], tool_options["alpha"]
         if start_x is None:
@@ -574,21 +616,26 @@ class PixelCanvas(ttk.Frame):
         if not tool_options["active_layer"].visible:
             self.app.show_hidden_layer_warning()
             return
+
+        self._cleanup_preview()
         self.drawing = True
         self.stroke_pixels_drawn_this_stroke.clear()
+
         tool = tool_options["tool"]
         if tool == "shape":
             self.start_shape_point = (px, py)
+        elif tool == "fill":
+            self.flood_fill(px, py, tool_options)
         else:
             self.last_draw_pixel_x, self.last_draw_pixel_y = px, py
-            if tool == "fill":
-                self.flood_fill(px, py, tool_options)
-            else:
-                self._draw_preview_brush(px, py, tool == "eraser", tool_options)
-                for brush_px, brush_py in self._get_brush_pixels(
-                    px, py, tool_options["brush_size"]
-                ):
-                    self.stroke_pixels_drawn_this_stroke.add((brush_px, brush_py))
+
+            initial_pixels = set(
+                self._get_brush_pixels(px, py, tool_options["brush_size"])
+            )
+            self.stroke_pixels_drawn_this_stroke.update(initial_pixels)
+            self.new_preview_pixels.update(initial_pixels)
+
+            self._schedule_preview_render()
 
     def draw(self, event, tool_options):
         if not self.drawing or self.app.eyedropper_mode:
@@ -596,6 +643,7 @@ class PixelCanvas(ttk.Frame):
         curr_px, curr_py = self.get_pixel_coords(event.x, event.y)
         tool = tool_options["tool"]
         if tool == "shape":
+
             if curr_px is None or self.start_shape_point is None:
                 return
             if self.preview_shape_item:
@@ -653,12 +701,14 @@ class PixelCanvas(ttk.Frame):
             if self.preview_shape_item:
                 self.canvas.tag_raise(self.preview_shape_item)
         elif tool != "fill":
+
             if curr_px is None:
                 self.last_draw_pixel_x = self.last_draw_pixel_y = None
                 return
             if (curr_px, curr_py) == (self.last_draw_pixel_x, self.last_draw_pixel_y):
                 return
-            is_eraser = tool == "eraser"
+
+            pixels_to_add = set()
             if self.last_draw_pixel_x is not None:
                 for p_x, p_y in bresenham_line(
                     self.last_draw_pixel_x, self.last_draw_pixel_y, curr_px, curr_py
@@ -673,22 +723,26 @@ class PixelCanvas(ttk.Frame):
                             self.stroke_pixels_drawn_this_stroke.add(
                                 (brush_px, brush_py)
                             )
-                            self._draw_preview_rect(
-                                brush_px, brush_py, is_eraser, tool_options
-                            )
+                            pixels_to_add.add((brush_px, brush_py))
+
+            self.new_preview_pixels.update(pixels_to_add)
             self.last_draw_pixel_x, self.last_draw_pixel_y = curr_px, curr_py
 
     def stop_draw(self, event, tool_options):
         if not self.drawing or not tool_options["active_layer"]:
             return
+
         self.drawing = False
-        self.canvas.delete("preview_stroke")
+        self._render_preview_frame()
+        self._cleanup_preview()
+
         tool, active_layer_data = (
             tool_options["tool"],
             tool_options["active_layer_data"],
         )
         pixels_to_process, pixels_before = set(), {}
         if tool == "shape":
+
             if self.preview_shape_item:
                 self.canvas.delete(self.preview_shape_item)
                 self.preview_shape_item = None
@@ -779,8 +833,9 @@ class PixelCanvas(ttk.Frame):
                                             inner_ellipse.add((px, py))
                         pixels_to_process.update(full_ellipse - inner_ellipse)
                     else:
-                        line_points = bresenham_line(x0 - rx, y0 - ry, x0 + rx, y0 + ry)
-                        for px, py in line_points:
+                        for px, py in bresenham_line(
+                            x0 - rx, y0 - ry, x0 + rx, y0 + ry
+                        ):
                             if (
                                 0 <= px < self.app.canvas_width
                                 and 0 <= py < self.app.canvas_height
@@ -824,6 +879,7 @@ class PixelCanvas(ttk.Frame):
             self.rescale_canvas()
 
     def _core_pick_color_at_pixel(self, px, py):
+
         if px is None:
             return False
         for layer in reversed(self.app.layers):
@@ -836,6 +892,7 @@ class PixelCanvas(ttk.Frame):
         return False
 
     def start_mmb_eyedropper(self, event):
+
         px, py = self.get_pixel_coords(event.x, event.y)
         if px is None:
             return
@@ -845,15 +902,18 @@ class PixelCanvas(ttk.Frame):
         self._core_pick_color_at_pixel(px, py)
 
     def mmb_eyedropper_motion(self, event):
+
         if self.mmb_eyedropper_active:
             self._core_pick_color_at_pixel(*self.get_pixel_coords(event.x, event.y))
 
     def stop_mmb_eyedropper(self, event):
+
         if self.mmb_eyedropper_active:
             self.mmb_eyedropper_active = False
             self.canvas.configure(cursor=self.original_cursor_before_mmb)
 
     def start_pan(self, event):
+
         self.panning = True
         self.original_cursor_before_pan = self.canvas.cget("cursor")
         self.canvas.config(cursor="fleur")
@@ -864,5 +924,6 @@ class PixelCanvas(ttk.Frame):
         self._update_visible_canvas_image()
 
     def stop_pan(self, event):
+
         self.panning = False
         self.canvas.config(cursor=self.original_cursor_before_pan)
