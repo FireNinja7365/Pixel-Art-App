@@ -5,6 +5,8 @@ import math
 import colorsys
 import re
 
+from utilities import hex_to_rgb, rgb_to_hex, handle_slider_click
+
 
 class ColorWheelPicker(ttk.Frame):
     def __init__(
@@ -53,18 +55,6 @@ class ColorWheelPicker(ttk.Frame):
             self.color_canvas.tag_bind(tag, "<Button-1>", self.start_sv_drag)
         self.color_canvas.bind("<B1-Motion>", self.on_canvas_drag)
         self.color_canvas.bind("<ButtonRelease-1>", self.stop_drag)
-
-    def _hex_to_rgb(self, hex_color_str):
-        h = hex_color_str.lstrip("#")
-        if len(h) != 6:
-            return (0, 0, 0)
-        try:
-            return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))
-        except ValueError:
-            return (0, 0, 0)
-
-    def _rgb_to_hex(self, r, g, b):
-        return f"#{int (r ):02x}{int (g ):02x}{int (b ):02x}"
 
     def _create_preview_canvas(self):
         preview_container = ttk.Frame(self)
@@ -148,8 +138,7 @@ class ColorWheelPicker(ttk.Frame):
             )
             self.alpha_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
             self.alpha_slider.bind(
-                "<Button-1>",
-                lambda e: ColorWheelPicker.handle_slider_click(e, self.alpha_slider),
+                "<Button-1>", lambda e: handle_slider_click(e, self.alpha_slider)
             )
 
     def set_color(self, hex_color, alpha=None, run_callback=True):
@@ -158,7 +147,7 @@ class ColorWheelPicker(ttk.Frame):
         if not hex_color or not hex_color.startswith("#"):
             return
 
-        r, g, b = self._hex_to_rgb(hex_color)
+        r, g, b = hex_to_rgb(hex_color)
         self.hue, self.saturation, self.value = colorsys.rgb_to_hsv(
             r / 255.0, g / 255.0, b / 255.0
         )
@@ -172,7 +161,7 @@ class ColorWheelPicker(ttk.Frame):
     def _fire_callback(self):
         rgb_float = colorsys.hsv_to_rgb(self.hue, self.saturation, self.value)
         r, g, b = tuple(int(c * 255) for c in rgb_float)
-        hex_color = self._rgb_to_hex(r, g, b)
+        hex_color = rgb_to_hex(r, g, b)
         self.color_change_callback(hex_color, self.alpha)
 
     def _update_ui(self):
@@ -222,7 +211,7 @@ class ColorWheelPicker(ttk.Frame):
                 0, 0, image=self.preview_image_tk, anchor="nw"
             )
         else:
-            hex_color = self._rgb_to_hex(r, g, b)
+            hex_color = rgb_to_hex(r, g, b)
             self.preview_canvas.config(bg=hex_color)
 
     def _update_indicators(self):
@@ -250,7 +239,7 @@ class ColorWheelPicker(ttk.Frame):
     def _update_text_inputs(self):
         rgb_float = colorsys.hsv_to_rgb(self.hue, self.saturation, self.value)
         r, g, b = tuple(int(c * 255) for c in rgb_float)
-        self.hex_var.set(self._rgb_to_hex(r, g, b).lstrip("#"))
+        self.hex_var.set(rgb_to_hex(r, g, b).lstrip("#"))
         self.r_var.set(str(r))
         self.g_var.set(str(g))
         self.b_var.set(str(b))
@@ -363,7 +352,7 @@ class ColorWheelPicker(ttk.Frame):
                 int(self.g_var.get() or 0),
                 int(self.b_var.get() or 0),
             )
-            self.set_color(self._rgb_to_hex(r, g, b))
+            self.set_color(rgb_to_hex(r, g, b))
         except (ValueError, tk.TclError):
             pass
 
@@ -417,11 +406,3 @@ class ColorWheelPicker(ttk.Frame):
         if self.show_preview:
             self._update_preview()
         self._fire_callback()
-
-    @staticmethod
-    def handle_slider_click(event, slider):
-        if slider.identify(event.x, event.y) in ("trough1", "trough2"):
-            if (widget_size := slider.winfo_width()) > 0:
-                from_, to = float(slider.cget("from")), float(slider.cget("to"))
-                fraction = max(0.0, min(1.0, event.x / widget_size))
-                slider.set(from_ + (fraction * (to - from_)))
