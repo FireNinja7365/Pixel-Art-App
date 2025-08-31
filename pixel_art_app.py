@@ -10,6 +10,7 @@ import copy
 
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from color_wheel_picker import ColorWheelPicker
+from pixel_canvas import PixelCanvas
 from actions import (
     PixelAction,
     AddLayerAction,
@@ -19,10 +20,10 @@ from actions import (
     RenameLayerAction,
     MergeLayerAction,
 )
+from utilities import hex_to_rgb, rgb_to_hex, handle_slider_click
 
 
 class Layer:
-
     _counter = 1
 
     def __init__(self, name=None):
@@ -40,7 +41,6 @@ class PixelArtApp:
         self.root = root
         self.root.title("Pixel Art Drawing App")
         self.root.geometry("1260x720")
-
         self.icon_path = Path(__file__).parent / "assets" / "app.ico"
         try:
             if self.icon_path.exists():
@@ -55,49 +55,35 @@ class PixelArtApp:
         self.zoom_factor = 1.2
         self.grid_color = "#cccccc"
         self.current_color, self.current_alpha = "#000000", 255
-        self.drawing, self.current_tool, self.eyedropper_mode = False, "pencil", False
-        self.last_used_tool = "pencil"
-        self.mmb_eyedropper_active = False
-        self.panning = False
-        self.original_cursor_before_mmb, self.original_cursor_before_pan = "", ""
+        self.current_tool, self.last_used_tool = "pencil", "pencil"
+        self.eyedropper_mode = False
         self.current_filename = None
-        self.art_sprite_image, self.art_sprite_canvas_item = None, None
-        self._after_id_render, self._after_id_resize = None, None
+        self.layers, self.active_layer_index = [], -1
+        self.undo_stack, self.redo_stack = [], []
 
-        self.layers = []
-        self.active_layer_index = -1
-
-        self._full_art_image_cache = None
-        self._force_full_redraw = True
-        self._dirty_bbox = None
-
-        self.last_draw_pixel_x, self.last_draw_pixel_y = None, None
-        self.stroke_pixels_drawn_this_stroke = set()
-        self.start_shape_point, self.preview_shape_item = None, None
-
-        self.show_canvas_background_var = tk.BooleanVar(value=False)
-        self.save_background_var = tk.BooleanVar(value=False)
-        self.render_pixel_alpha_var = tk.BooleanVar(value=True)
-        self.color_blending_var = tk.BooleanVar(value=True)
+        self.show_canvas_background_var, self.save_background_var = tk.BooleanVar(
+            value=False
+        ), tk.BooleanVar(value=False)
+        self.render_pixel_alpha_var, self.color_blending_var = tk.BooleanVar(
+            value=True
+        ), tk.BooleanVar(value=True)
         self.show_grid_var = tk.BooleanVar(value=False)
         self.brush_size_var = tk.IntVar(value=self.brush_size)
         self.fill_shape_var = tk.BooleanVar(value=False)
-
-        self.undo_stack = []
-        self.redo_stack = []
-
-        self.canvas_menu = None
-        self.layer_context_menu = None
-        self.layer_area_context_menu = None
+        self.tool_var = tk.StringVar(value="pencil")
+        self.canvas_menu, self.layer_context_menu, self.layer_area_context_menu = (
+            None,
+            None,
+            None,
+        )
 
         self.setup_menu()
         self.setup_ui()
         self.setup_layers_ui()
         self.setup_drag_and_drop()
-
         self._initialize_layers()
-
         self.create_canvas()
+        self.root.bind("<Configure>", self.on_window_resize)
         self._update_shape_controls_state()
         self._update_brush_controls_state()
         self._update_color_picker_from_app_state()
@@ -106,44 +92,19 @@ class PixelArtApp:
 
     @property
     def active_layer(self):
-        if self.layers and 0 <= self.active_layer_index < len(self.layers):
-            return self.layers[self.active_layer_index]
-        return None
+        return (
+            self.layers[self.active_layer_index]
+            if self.layers and 0 <= self.active_layer_index < len(self.layers)
+            else None
+        )
 
     @property
     def active_layer_data(self):
-        layer = self.active_layer
-        return layer.pixel_data if layer else {}
-
-    def _hex_to_rgb(self, hex_color_str):
-        h = hex_color_str.lstrip("#")
-        if len(h) != 6:
-            return (0, 0, 0)
-        try:
-            return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))
-        except ValueError:
-            return (0, 0, 0)
-
-    def _rgb_to_hex(self, r, g, b):
-        return f"#{int (r ):02x}{int (g ):02x}{int (b ):02x}"
-
-    def _update_dirty_bbox(self, x, y):
-
-        if self._dirty_bbox is None:
-            self._dirty_bbox = (x, y, x + 1, y + 1)
-        else:
-            min_x, min_y, max_x, max_y = self._dirty_bbox
-            self._dirty_bbox = (
-                min(min_x, x),
-                min(min_y, y),
-                max(max_x, x + 1),
-                max(max_y, y + 1),
-            )
+        return self.active_layer.pixel_data if self.active_layer else {}
 
     def setup_menu(self):
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
-
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
         file_menu.add_command(
@@ -158,15 +119,12 @@ class PixelArtApp:
             label="Save", command=self.save_file, accelerator="Ctrl+S"
         )
         file_menu.add_command(
-            label="Export As...",
-            command=self.export_png,
-            accelerator="Ctrl+Shift+S",
+            label="Export As...", command=self.export_png, accelerator="Ctrl+Shift+S"
         )
         file_menu.add_separator()
         file_menu.add_command(
             label="Exit", command=self.root.quit, accelerator="Ctrl+Q"
         )
-
         self.canvas_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Canvas", menu=self.canvas_menu)
         self.canvas_menu.add_command(
@@ -197,7 +155,6 @@ class PixelArtApp:
             variable=self.render_pixel_alpha_var,
             command=self.toggle_pixel_alpha_rendering,
         )
-
         for key, func in [
             ("<Control-n>", self.new_canvas),
             ("<Control-o>", self.open_file),
@@ -210,8 +167,9 @@ class PixelArtApp:
             self.root.bind(key, lambda e, f=func: f())
 
     def _update_history_controls(self):
-        undo_state = tk.NORMAL if self.undo_stack else tk.DISABLED
-        redo_state = tk.NORMAL if self.redo_stack else tk.DISABLED
+        undo_state, redo_state = (tk.NORMAL if self.undo_stack else tk.DISABLED), (
+            tk.NORMAL if self.redo_stack else tk.DISABLED
+        )
         if hasattr(self, "undo_button"):
             self.undo_button.config(state=undo_state)
             self.redo_button.config(state=redo_state)
@@ -229,7 +187,6 @@ class PixelArtApp:
         self._update_history_controls()
 
     def add_action(self, action):
-
         self.undo_stack.append(action)
         self.redo_stack.clear()
         self._update_history_controls()
@@ -240,9 +197,7 @@ class PixelArtApp:
         action = self.undo_stack.pop()
         action.undo(self)
         self.redo_stack.append(action)
-
-        self._force_full_redraw = True
-        self._rescale_canvas()
+        self.pixel_canvas.force_redraw()
         self._update_layers_ui()
         self._update_history_controls()
 
@@ -252,9 +207,7 @@ class PixelArtApp:
         action = self.redo_stack.pop()
         action.redo(self)
         self.undo_stack.append(action)
-
-        self._force_full_redraw = True
-        self._rescale_canvas()
+        self.pixel_canvas.force_redraw()
         self._update_layers_ui()
         self._update_history_controls()
 
@@ -294,14 +247,12 @@ class PixelArtApp:
                         new_height,
                     ):
                         self.canvas_width, self.canvas_height = new_width, new_height
-
                         for layer in self.layers:
-                            new_pixel_data = {}
-                            for (x, y), data in layer.pixel_data.items():
-                                if 0 <= x < new_width and 0 <= y < new_height:
-                                    new_pixel_data[(x, y)] = data
-                            layer.pixel_data = new_pixel_data
-
+                            layer.pixel_data = {
+                                (x, y): data
+                                for (x, y), data in layer.pixel_data.items()
+                                if 0 <= x < new_width and 0 <= y < new_height
+                            }
                         self._clear_history()
                         self.create_canvas()
                     dialog.destroy()
@@ -328,42 +279,32 @@ class PixelArtApp:
         dialog.bind("<Escape>", lambda e: dialog.destroy())
 
     def on_window_resize(self, event):
-        if event.widget == self.root:
-            if self._after_id_resize:
-                self.root.after_cancel(self._after_id_resize)
-            self._after_id_resize = self.root.after(50, self._rescale_canvas)
+        if event.widget == self.root and hasattr(self, "pixel_canvas"):
+            self.pixel_canvas.schedule_rescale()
 
     def _update_canvas_workarea_color(self):
-        if not self.show_canvas_background_var.get():
-            self.canvas.config(bg="#C0C0C0")
+        if not hasattr(self, "pixel_canvas"):
             return
-        r, g, b = self._hex_to_rgb(self.canvas_bg_color)
-        grayscale_value = int(r * 0.299 + g * 0.587 + b * 0.114)
-        adjustment = 32
-        new_gray_value = (
-            grayscale_value - adjustment
-            if grayscale_value >= 128
-            else grayscale_value + adjustment
-        )
-        new_gray_value = max(0, min(255, new_gray_value))
-        new_hex_color = self._rgb_to_hex(new_gray_value, new_gray_value, new_gray_value)
-        self.canvas.config(bg=new_hex_color)
+        canvas = self.pixel_canvas.canvas
+        if not self.show_canvas_background_var.get():
+            canvas.config(bg="#C0C0C0")
+            return
+        r, g, b = hex_to_rgb(self.canvas_bg_color)
+        gs = int(r * 0.299 + g * 0.587 + b * 0.114)
+        new_gs = max(0, min(255, gs - 32 if gs >= 128 else gs + 32))
+        canvas.config(bg=rgb_to_hex(new_gs, new_gs, new_gs))
 
     def setup_ui(self):
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
         left_panel = ttk.Frame(main_frame, width=250)
         left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
         left_panel.pack_propagate(False)
-
         self.right_panel = ttk.Frame(main_frame, width=220)
         self.right_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(10, 0))
         self.right_panel.pack_propagate(False)
-
         tools_frame = ttk.LabelFrame(left_panel, text="Tools", padding=10)
         tools_frame.pack(fill=tk.X, pady=(0, 10))
-        self.tool_var = tk.StringVar(value="pencil")
         for tool in ["pencil", "eraser", "fill"]:
             ttk.Radiobutton(
                 tools_frame,
@@ -372,7 +313,6 @@ class PixelArtApp:
                 value=tool,
                 command=self.change_tool,
             ).pack(anchor=tk.W)
-
         shape_line_frame = ttk.Frame(tools_frame)
         shape_line_frame.pack(fill=tk.X, anchor=tk.W, pady=(2, 0))
         ttk.Radiobutton(
@@ -392,31 +332,25 @@ class PixelArtApp:
         )
         self.shape_combobox.pack(side=tk.LEFT, padx=(5, 0), anchor=tk.W)
         self.shape_combobox.bind("<<ComboboxSelected>>", self.on_shape_type_change)
-
         shape_options_frame = ttk.Frame(tools_frame)
         shape_options_frame.pack(fill=tk.X, anchor=tk.W, padx=(20, 0))
-
         self.fill_shape_checkbox = ttk.Checkbutton(
             shape_options_frame, text="Fill Shape", variable=self.fill_shape_var
         )
         self.fill_shape_checkbox.pack(side=tk.LEFT, pady=(2, 0))
-
         self.lock_aspect_var = tk.BooleanVar(value=False)
         self.lock_aspect_checkbox = ttk.Checkbutton(
             shape_options_frame, text="Lock Aspect", variable=self.lock_aspect_var
         )
         self.lock_aspect_checkbox.pack(side=tk.LEFT, pady=(2, 0), padx=(10, 0))
-
         self.brush_size_frame = ttk.LabelFrame(
             tools_frame, text="Brush Size", padding=5
         )
         self.brush_size_frame.pack(fill=tk.X, pady=(10, 0), anchor=tk.W)
-
-        brush_size_inner_frame = ttk.Frame(self.brush_size_frame)
-        brush_size_inner_frame.pack(fill=tk.X)
-
+        bs_inner_frame = ttk.Frame(self.brush_size_frame)
+        bs_inner_frame.pack(fill=tk.X)
         self.brush_size_slider = tk.Scale(
-            brush_size_inner_frame,
+            bs_inner_frame,
             from_=1,
             to=20,
             orient=tk.HORIZONTAL,
@@ -435,78 +369,45 @@ class PixelArtApp:
         self.brush_size_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.brush_size_slider.bind(
             "<Button-1>",
-            lambda e: ColorWheelPicker.handle_slider_click(e, self.brush_size_slider),
+            lambda e: handle_slider_click(e, self.brush_size_slider),
         )
-
         self.brush_size_label = ttk.Label(
-            brush_size_inner_frame,
-            text=f"{self .brush_size }",
-            width=5,
-            anchor="e",
+            bs_inner_frame, text=f"{self .brush_size }", width=5, anchor="e"
         )
         self.brush_size_label.pack(side=tk.RIGHT, padx=(5, 0))
-
         color_frame = ttk.LabelFrame(left_panel, text="Color Picker", padding=10)
         color_frame.pack(fill=tk.X, pady=(0, 10))
-
         self.color_wheel = ColorWheelPicker(
             color_frame, self._on_color_wheel_change, show_alpha=True, show_preview=True
         )
         self.color_wheel.pack()
-
         ttk.Button(
             color_frame, text="Pick Color (Eyedropper)", command=self.toggle_eyedropper
         ).pack(pady=10)
-
         history_frame = ttk.LabelFrame(left_panel, text="History", padding=10)
         history_frame.pack(fill=tk.X, pady=(0, 10))
-        button_container = ttk.Frame(history_frame)
-        button_container.pack()
-        self.undo_button = ttk.Button(button_container, text="Undo", command=self.undo)
+        btn_container = ttk.Frame(history_frame)
+        btn_container.pack()
+        self.undo_button = ttk.Button(btn_container, text="Undo", command=self.undo)
         self.undo_button.pack(side=tk.LEFT, padx=(0, 5))
-        self.redo_button = ttk.Button(button_container, text="Redo", command=self.redo)
+        self.redo_button = ttk.Button(btn_container, text="Redo", command=self.redo)
         self.redo_button.pack(side=tk.LEFT)
-
         canvas_frame = ttk.Frame(main_frame)
         canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        v_scroll = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL)
-        h_scroll = ttk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL)
-        self.canvas = tk.Canvas(
-            canvas_frame,
-            bg="#C0C0C0",
-            yscrollcommand=v_scroll.set,
-            xscrollcommand=h_scroll.set,
-            highlightthickness=0,
+        self.pixel_canvas = PixelCanvas(
+            canvas_frame, self, pick_color_callback=self._handle_eyedropper_pick
         )
-        v_scroll.config(command=self.on_scroll_y)
-        h_scroll.config(command=self.on_scroll_x)
-        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self.canvas.bind("<Button-1>", self.start_draw)
-        self.canvas.bind("<B1-Motion>", self.draw)
-        self.canvas.bind("<ButtonRelease-1>", self.stop_draw)
-        self.canvas.bind("<Button-2>", self.start_mmb_eyedropper)
-        self.canvas.bind("<B2-Motion>", self.mmb_eyedropper_motion)
-        self.canvas.bind("<ButtonRelease-2>", self.stop_mmb_eyedropper)
-        self.canvas.bind("<Button-3>", self.start_pan)
-        self.canvas.bind("<B3-Motion>", self.pan_motion)
-        self.canvas.bind("<ButtonRelease-3>", self.stop_pan)
-        self.canvas.bind("<MouseWheel>", self.on_canvas_scroll)
-        self.canvas.bind("<Button-4>", self.on_canvas_scroll)
-        self.canvas.bind("<Button-5>", self.on_canvas_scroll)
-        self.root.bind("<Configure>", self.on_window_resize)
-
+        self.pixel_canvas.pack(fill=tk.BOTH, expand=True)
+        self.pixel_canvas.canvas.bind("<Button-1>", self.on_canvas_press_1)
+        self.pixel_canvas.canvas.bind("<B1-Motion>", self.on_canvas_motion_1)
+        self.pixel_canvas.canvas.bind("<ButtonRelease-1>", self.on_canvas_release_1)
         self._update_canvas_workarea_color()
 
     def setup_layers_ui(self):
         layers_frame = ttk.LabelFrame(self.right_panel, text="Layers", padding=10)
         layers_frame.pack(fill=tk.BOTH, expand=True)
-
         tree_frame = ttk.Frame(layers_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True)
-
         self.layers_tree = ttk.Treeview(
             tree_frame, columns=("vis", "name"), show="headings", selectmode="browse"
         )
@@ -515,15 +416,12 @@ class PixelArtApp:
         self.layers_tree.column("vis", width=25, anchor="center", stretch=False)
         self.layers_tree.column("name", stretch=True)
         self.layers_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
         tree_scroll = ttk.Scrollbar(
             tree_frame, orient="vertical", command=self.layers_tree.yview
         )
         tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.layers_tree.configure(yscrollcommand=tree_scroll.set)
-
         self.layers_tree.tag_configure("active", background="#cce5ff")
-
         self.layer_context_menu = tk.Menu(self.layers_tree, tearoff=0)
         self.layer_context_menu.add_command(label="Move Up", command=self.move_layer_up)
         self.layer_context_menu.add_command(
@@ -541,17 +439,14 @@ class PixelArtApp:
             label="Rename", command=self.rename_selected_layer
         )
         self.layer_context_menu.add_command(label="Delete", command=self.delete_layer)
-
         self.layer_area_context_menu = tk.Menu(self.layers_tree, tearoff=0)
         self.layer_area_context_menu.add_command(
             label="Add Layer", command=self.add_layer
         )
-
         self.layers_tree.bind("<<TreeviewSelect>>", self._on_layer_select)
         self.layers_tree.bind("<Button-1>", self._on_layer_tree_click)
         self.layers_tree.bind("<Button-3>", self._on_layer_right_click)
         self.layers_tree.bind("<Double-1>", self._on_layer_rename_start)
-
         buttons_frame = ttk.Frame(layers_frame)
         buttons_frame.pack(fill=tk.X, pady=(10, 0))
         ttk.Button(buttons_frame, text="Add Layer", command=self.add_layer).pack(
@@ -567,25 +462,19 @@ class PixelArtApp:
     def _update_layers_ui(self):
         for item in self.layers_tree.get_children():
             self.layers_tree.delete(item)
-
         for i, layer in reversed(list(enumerate(self.layers))):
-            visibility_icon = "👁" if layer.visible else " "
-            tags = ("active",) if i == self.active_layer_index else ()
             self.layers_tree.insert(
-                "", tk.END, iid=str(i), values=(visibility_icon, layer.name), tags=tags
+                "",
+                tk.END,
+                iid=str(i),
+                values=("👁" if layer.visible else " ", layer.name),
+                tags=("active",) if i == self.active_layer_index else (),
             )
-
         if self.layers and 0 <= self.active_layer_index < len(self.layers):
             active_item_id = str(self.active_layer_index)
             if active_item_id not in self.layers_tree.selection():
                 self.layers_tree.selection_set(active_item_id)
             self.layers_tree.see(active_item_id)
-
-        self._update_layer_controls_state()
-
-    def _update_layer_controls_state(self):
-
-        pass
 
     def _on_layer_select(self, event):
         selected_items = self.layers_tree.selection()
@@ -598,61 +487,42 @@ class PixelArtApp:
 
     def _on_layer_tree_click(self, event):
         region = self.layers_tree.identify_region(event.x, event.y)
-
-        if region == "separator":
-            return "break"
-
         if region == "cell":
             item_id = self.layers_tree.identify_row(event.y)
-            column_id = self.layers_tree.identify_column(event.x)
-
-            if item_id and column_id == "#1":
+            column = self.layers_tree.identify_column(event.x)
+            if item_id and column == "#1":
                 layer_index = int(item_id)
                 self.layers[layer_index].visible = not self.layers[layer_index].visible
-                self._force_full_redraw = True
-                self._rescale_canvas()
+                self.pixel_canvas.force_redraw()
                 self._update_layers_ui()
 
     def _on_layer_right_click(self, event):
         item_id = self.layers_tree.identify_row(event.y)
         if not item_id:
-
             self.layer_area_context_menu.post(event.x_root, event.y_root)
             return
-
         self.layers_tree.selection_set(item_id)
-        layer_index = int(item_id)
-        num_layers = len(self.layers)
-
-        can_move_up = layer_index < num_layers - 1
-        can_move_down = layer_index > 0
-        can_delete = num_layers > 1
-
+        idx, num = int(item_id), len(self.layers)
         self.layer_context_menu.entryconfig(
-            "Move Up", state=tk.NORMAL if can_move_up else tk.DISABLED
+            "Move Up", state=tk.NORMAL if idx < num - 1 else tk.DISABLED
         )
         self.layer_context_menu.entryconfig(
-            "Move Down", state=tk.NORMAL if can_move_down else tk.DISABLED
+            "Move Down", state=tk.NORMAL if idx > 0 else tk.DISABLED
         )
         self.layer_context_menu.entryconfig(
-            "Merge Down", state=tk.NORMAL if can_move_down else tk.DISABLED
+            "Merge Down", state=tk.NORMAL if idx > 0 else tk.DISABLED
         )
-        self.layer_context_menu.entryconfig("Duplicate", state=tk.NORMAL)
         self.layer_context_menu.entryconfig(
-            "Delete", state=tk.NORMAL if can_delete else tk.DISABLED
+            "Delete", state=tk.NORMAL if num > 1 else tk.DISABLED
         )
-
         self.layer_context_menu.post(event.x_root, event.y_root)
 
     def rename_selected_layer(self):
         selected_items = self.layers_tree.selection()
         if not selected_items:
             return
-
-        item_id = selected_items[0]
-        layer_index = int(item_id)
-
-        x, y, width, height = self.layers_tree.bbox(item_id, "name")
+        layer_index = int(selected_items[0])
+        x, y, width, height = self.layers_tree.bbox(selected_items[0], "name")
         entry = ttk.Entry(self.layers_tree)
         entry.place(x=x, y=y, width=width, height=height)
         entry.insert(0, self.layers[layer_index].name)
@@ -664,8 +534,7 @@ class PixelArtApp:
             new_name = entry.get().strip()
             if new_name and new_name != old_name:
                 self.layers[layer_index].name = new_name
-                action = RenameLayerAction(layer_index, old_name, new_name)
-                self.add_action(action)
+                self.add_action(RenameLayerAction(layer_index, old_name, new_name))
             entry.destroy()
             self._update_layers_ui()
 
@@ -674,123 +543,125 @@ class PixelArtApp:
 
     def _on_layer_rename_start(self, event):
         region = self.layers_tree.identify_region(event.x, event.y)
-        if region != "cell" or self.layers_tree.identify_column(event.x) != "#2":
-            return
-        item_id = self.layers_tree.identify_row(event.y)
-        if not item_id:
-            return
-
-        self.layers_tree.selection_set(item_id)
-        self.rename_selected_layer()
+        if region == "cell" and self.layers_tree.identify_column(event.x) == "#2":
+            if item_id := self.layers_tree.identify_row(event.y):
+                self.layers_tree.selection_set(item_id)
+                self.rename_selected_layer()
 
     def add_layer(self, name=None, select=False, add_to_history=True):
-        new_layer = Layer(name)
-        prev_active_index = self.active_layer_index
-
-        insert_pos = self.active_layer_index + 1 if self.active_layer_index != -1 else 0
+        new_layer, prev_idx = Layer(name), self.active_layer_index
+        insert_pos = prev_idx + 1 if prev_idx != -1 else 0
         self.layers.insert(insert_pos, new_layer)
-
         self.active_layer_index = insert_pos
-
         if add_to_history:
-            action = AddLayerAction(new_layer, insert_pos, prev_active_index)
-            self.add_action(action)
-
+            self.add_action(AddLayerAction(new_layer, insert_pos, prev_idx))
         self._update_layers_ui()
 
     def delete_layer(self):
         if len(self.layers) <= 1:
             return
-
-        prev_active_index = self.active_layer_index
-        delete_index = self.active_layer_index
-        deleted_layer = self.layers[delete_index]
-
-        del self.layers[self.active_layer_index]
-
-        new_active_index = self.active_layer_index
-        if new_active_index >= len(self.layers):
-            new_active_index = len(self.layers) - 1
-        self.active_layer_index = new_active_index
-
-        action = DeleteLayerAction(
-            deleted_layer, delete_index, prev_active_index, new_active_index
-        )
-        self.add_action(action)
-
-        self._force_full_redraw = True
-        self._rescale_canvas()
+        prev_idx, del_idx = self.active_layer_index, self.active_layer_index
+        deleted_layer = self.layers[del_idx]
+        del self.layers[del_idx]
+        new_idx = prev_idx if prev_idx < len(self.layers) else len(self.layers) - 1
+        self.active_layer_index = new_idx
+        self.add_action(DeleteLayerAction(deleted_layer, del_idx, prev_idx, new_idx))
+        self.pixel_canvas.force_redraw()
         self._update_layers_ui()
 
     def move_layer_up(self):
-        if self.active_layer_index >= len(self.layers) - 1:
-            return
         idx = self.active_layer_index
+        if idx >= len(self.layers) - 1:
+            return
         self.layers[idx], self.layers[idx + 1] = self.layers[idx + 1], self.layers[idx]
         self.active_layer_index += 1
-
-        action = MoveLayerAction(
-            from_index=idx, to_index=idx + 1, active_index_after=self.active_layer_index
+        self.add_action(
+            MoveLayerAction(
+                from_index=idx,
+                to_index=idx + 1,
+                active_index_after=self.active_layer_index,
+            )
         )
-        self.add_action(action)
-
-        self._force_full_redraw = True
-        self._rescale_canvas()
+        self.pixel_canvas.force_redraw()
         self._update_layers_ui()
 
     def move_layer_down(self):
-        if self.active_layer_index <= 0:
-            return
         idx = self.active_layer_index
+        if idx <= 0:
+            return
         self.layers[idx], self.layers[idx - 1] = self.layers[idx - 1], self.layers[idx]
         self.active_layer_index -= 1
-
-        action = MoveLayerAction(
-            from_index=idx, to_index=idx - 1, active_index_after=self.active_layer_index
+        self.add_action(
+            MoveLayerAction(
+                from_index=idx,
+                to_index=idx - 1,
+                active_index_after=self.active_layer_index,
+            )
         )
-        self.add_action(action)
-
-        self._force_full_redraw = True
-        self._rescale_canvas()
+        self.pixel_canvas.force_redraw()
         self._update_layers_ui()
 
     def merge_layer_down(self):
-        if self.active_layer_index <= 0:
+        idx = self.active_layer_index
+        if idx <= 0:
             return
 
-        idx_upper = self.active_layer_index
+        upper_orig = copy.deepcopy(self.layers[idx])
+        lower_orig = copy.deepcopy(self.layers[idx - 1])
 
-        upper_layer_original = copy.deepcopy(self.layers[idx_upper])
-        lower_layer_original = copy.deepcopy(self.layers[idx_upper - 1])
+        upper = self.layers[idx]
+        lower = self.layers[idx - 1]
 
-        action = MergeLayerAction(upper_layer_original, lower_layer_original, idx_upper)
+        merged_data = lower.pixel_data.copy()
+        for (x, y), (upper_hex, upper_alpha) in upper.pixel_data.items():
+            if upper_alpha == 0:
+                continue
 
-        action.redo(self)
+            original_pixel = merged_data.get((x, y))
+            final_hex, final_alpha = upper_hex, upper_alpha
 
+            if (
+                self.color_blending_var.get()
+                and 0 < upper_alpha < 255
+                and original_pixel
+                and original_pixel[1] > 0
+            ):
+                bg_hex, bg_a_int = original_pixel
+                final_hex, final_alpha = blend_colors(
+                    upper_hex, upper_alpha, bg_hex, bg_a_int
+                )
+
+            if final_alpha > 0:
+                merged_data[(x, y)] = (final_hex, final_alpha)
+            elif (x, y) in merged_data:
+                del merged_data[(x, y)]
+
+        lower.pixel_data = merged_data
+        self.layers.pop(idx)
+        self.active_layer_index = idx - 1
+
+        merged_lower_final = copy.deepcopy(self.layers[idx - 1])
+
+        action = MergeLayerAction(upper_orig, lower_orig, merged_lower_final, idx)
         self.add_action(action)
 
-        self._force_full_redraw = True
-        self._rescale_canvas()
+        self.pixel_canvas.force_redraw()
         self._update_layers_ui()
 
     def duplicate_layer(self):
-        if not self.layers or self.active_layer_index < 0:
+        if not self.active_layer:
             return
-
-        original_layer = self.layers[self.active_layer_index]
-        prev_active_index = self.active_layer_index
-        insert_pos = self.active_layer_index + 1
-
-        new_layer = Layer(name=f"{original_layer .name } copy")
-        new_layer.pixel_data = copy.deepcopy(original_layer.pixel_data)
-        new_layer.visible = original_layer.visible
-
-        action = DuplicateLayerAction(new_layer, insert_pos, prev_active_index)
+        orig_layer, prev_idx = self.active_layer, self.active_layer_index
+        insert_pos = prev_idx + 1
+        new_layer = Layer(name=f"{orig_layer .name } copy")
+        new_layer.pixel_data, new_layer.visible = (
+            copy.deepcopy(orig_layer.pixel_data),
+            orig_layer.visible,
+        )
+        action = DuplicateLayerAction(new_layer, insert_pos, prev_idx)
         action.redo(self)
         self.add_action(action)
-
-        self._force_full_redraw = True
-        self._rescale_canvas()
+        self.pixel_canvas.force_redraw()
         self._update_layers_ui()
 
     def setup_drag_and_drop(self):
@@ -799,822 +670,89 @@ class PixelArtApp:
 
     def handle_drop(self, event):
         filepath = event.data.strip("{}")
-        supported_extensions = (".png", ".jpg", ".jpeg", ".gif", ".bmp")
-        if not filepath.lower().endswith(supported_extensions):
-            return
-        prompt_message = (
-            "Open this image? Any unsaved changes on the current canvas will be lost."
-        )
-        if messagebox.askyesno("Open Dropped File", prompt_message, parent=self.root):
+        if filepath.lower().endswith(
+            (".png", ".jpg", ".jpeg", ".gif", ".bmp")
+        ) and messagebox.askyesno(
+            "Open Dropped File",
+            "Open this image? Unsaved changes will be lost.",
+            parent=self.root,
+        ):
             self._load_image_from_path(filepath)
 
-    def _on_color_wheel_change(self, new_hex_color, new_alpha):
+    def _get_tool_options(self):
+        return {
+            "tool": self.tool_var.get(),
+            "color": self.current_color,
+            "alpha": self.current_alpha,
+            "brush_size": self.brush_size_var.get(),
+            "shape_type": self.shape_type_var.get(),
+            "fill_shape": self.fill_shape_var.get(),
+            "lock_aspect": self.lock_aspect_var.get()
+            and (str(self.lock_aspect_checkbox.cget("state")) == "normal"),
+            "active_layer": self.active_layer,
+            "active_layer_data": self.active_layer_data,
+            "active_layer_index": self.active_layer_index,
+        }
 
+    def on_canvas_press_1(self, event):
+        self.pixel_canvas.start_draw(event, self._get_tool_options())
+
+    def on_canvas_motion_1(self, event):
+        self.pixel_canvas.draw(event, self._get_tool_options())
+
+    def on_canvas_release_1(self, event):
+        self.pixel_canvas.stop_draw(event, self._get_tool_options())
+
+    def _handle_eyedropper_pick(self, color, alpha):
+        self.current_color, self.current_alpha = color, alpha
+        self._update_color_picker_from_app_state()
+
+    def _on_color_wheel_change(self, new_hex_color, new_alpha):
         if self.current_tool == "eraser":
             self.tool_var.set(self.last_used_tool)
             self.change_tool()
-        self.current_color = new_hex_color
-        self.current_alpha = new_alpha
+        self.current_color, self.current_alpha = new_hex_color, new_alpha
 
     def on_brush_size_change(self, value):
-        self.brush_size = self.brush_size_var.get()
-        self.brush_size_label.config(text=f"{self .brush_size }")
-
-    def on_scroll_y(self, *args):
-        self.canvas.yview(*args)
-        self._update_visible_canvas_image()
-
-    def on_scroll_x(self, *args):
-        self.canvas.xview(*args)
-        self._update_visible_canvas_image()
-
-    def on_canvas_scroll(self, event):
-        old_pixel_size = self.pixel_size
-        current_canvas_x, current_canvas_y = self.canvas.canvasx(
-            event.x
-        ), self.canvas.canvasy(event.y)
-        zoom_in = event.delta > 0 or event.num == 4
-        if zoom_in and self.pixel_size < 3:
-            new_pixel_size = self.pixel_size + 1
-        else:
-            new_pixel_size = (
-                self.pixel_size * self.zoom_factor
-                if zoom_in
-                else self.pixel_size / self.zoom_factor
-            )
-        new_pixel_size = max(
-            self.min_pixel_size, min(self.max_pixel_size, round(new_pixel_size))
-        )
-        if new_pixel_size == old_pixel_size:
-            return
-        self.pixel_size = new_pixel_size
-        self._update_canvas_scaling()
-
-        if self.drawing:
-            tool = self.tool_var.get()
-            if tool in ["pencil", "eraser"]:
-                self.canvas.delete("preview_stroke")
-                for px, py in self.stroke_pixels_drawn_this_stroke:
-                    self._draw_preview_rect(px, py, tool == "eraser")
-            elif tool == "shape":
-                self.draw(event)
-
-        pixel_x_at_cursor = current_canvas_x / old_pixel_size
-        pixel_y_at_cursor = current_canvas_y / old_pixel_size
-        new_canvas_x_for_pixel = pixel_x_at_cursor * self.pixel_size
-        new_canvas_y_for_pixel = pixel_y_at_cursor * self.pixel_size
-        new_scroll_x_abs = new_canvas_x_for_pixel - event.x
-        new_scroll_y_abs = new_canvas_y_for_pixel - event.y
-        s_region_str = self.canvas.cget("scrollregion")
-        if s_region_str:
-            try:
-                s_x1, s_y1, s_x2, s_y2 = map(int, s_region_str.split())
-                total_scroll_width, total_scroll_height = s_x2 - s_x1, s_y2 - s_y1
-                if total_scroll_width > 0:
-                    self.canvas.xview_moveto(
-                        (new_scroll_x_abs - s_x1) / total_scroll_width
-                    )
-                if total_scroll_height > 0:
-                    self.canvas.yview_moveto(
-                        (new_scroll_y_abs - s_y1) / total_scroll_height
-                    )
-            except (ValueError, IndexError):
-                pass
-
-        if self.panning:
-            self.canvas.scan_mark(event.x, event.y)
-
-        self._update_visible_canvas_image()
-
-    def _update_canvas_scaling(self):
-        total_width, total_height = (
-            self.canvas_width * self.pixel_size,
-            self.canvas_height * self.pixel_size,
-        )
-        grid_state = "normal" if self.show_grid_var.get() else "hidden"
-        for i, line_id in enumerate(self.canvas.find_withtag("grid_h")):
-            y = (i + 1) * self.pixel_size
-            self.canvas.coords(line_id, 0, y, total_width, y)
-            self.canvas.itemconfig(line_id, state=grid_state)
-        for i, line_id in enumerate(self.canvas.find_withtag("grid_v")):
-            x = (i + 1) * self.pixel_size
-            self.canvas.coords(line_id, x, 0, x, total_height)
-            self.canvas.itemconfig(line_id, state=grid_state)
-        margin = 50
-        viewport_width, viewport_height = max(1, self.canvas.winfo_width()), max(
-            1, self.canvas.winfo_height()
-        )
-        padding_x, padding_y = max(0, viewport_width - margin), max(
-            0, viewport_height - margin
-        )
-        self.canvas.configure(
-            scrollregion=(
-                -padding_x,
-                -padding_y,
-                total_width + padding_x,
-                total_height + padding_y,
-            )
-        )
-
-    def _rescale_canvas(self):
-        self._update_canvas_scaling()
-        self._update_visible_canvas_image()
+        self.brush_size_label.config(text=f"{self .brush_size_var .get ()}")
 
     def on_shape_type_change(self, event=None):
         shape = self.shape_type_var.get()
-        is_shape_tool_active = self.tool_var.get() == "shape"
-        checkbox_text = "Lock Aspect"
-        new_state = tk.DISABLED
-        if is_shape_tool_active:
-            if shape in ["Rectangle", "Ellipse"]:
-                checkbox_text = "Lock Square" if shape == "Rectangle" else "Lock Circle"
-                new_state = tk.NORMAL
+        checkbox_text, new_state = "Lock Aspect", tk.DISABLED
+        if self.tool_var.get() == "shape" and shape in ["Rectangle", "Ellipse"]:
+            checkbox_text, new_state = (
+                "Lock Square" if shape == "Rectangle" else "Lock Circle"
+            ), tk.NORMAL
         self.lock_aspect_checkbox.config(text=checkbox_text, state=new_state)
 
     def _update_shape_controls_state(self):
         is_shape_tool = self.tool_var.get() == "shape"
-        new_state = "readonly" if is_shape_tool else tk.DISABLED
-
-        self.shape_combobox.config(state=new_state)
+        self.shape_combobox.config(state="readonly" if is_shape_tool else tk.DISABLED)
         self.fill_shape_checkbox.config(
             state=tk.NORMAL if is_shape_tool else tk.DISABLED
         )
-
         self.on_shape_type_change()
 
     def _update_brush_controls_state(self):
-        tool = self.tool_var.get()
-        new_state = tk.NORMAL if tool in ["pencil", "eraser"] else tk.DISABLED
+        new_state = (
+            tk.NORMAL if self.tool_var.get() in ["pencil", "eraser"] else tk.DISABLED
+        )
         self.brush_size_slider.config(state=new_state)
         self.brush_size_label.config(state=new_state)
 
     def _update_color_picker_from_app_state(self):
-
-        if not hasattr(self, "color_wheel"):
-            return
-        self.color_wheel.set_color(
-            self.current_color, self.current_alpha, run_callback=False
-        )
+        if hasattr(self, "color_wheel"):
+            self.color_wheel.set_color(
+                self.current_color, self.current_alpha, run_callback=False
+            )
 
     def create_canvas(self):
-        self.canvas.delete("all")
-        self.art_sprite_image = self._full_art_image_cache = None
-        self._force_full_redraw = True
-        self._dirty_bbox = None
-        self.art_sprite_canvas_item = self.canvas.create_image(
-            0, 0, anchor="nw", tags="art_sprite"
+        self.pixel_canvas.create_canvas()
+
+    def show_hidden_layer_warning(self):
+        messagebox.showinfo(
+            "Hidden Layer", "You cannot draw on a hidden layer.", parent=self.root
         )
-        for _ in range(self.canvas_height - 1):
-            self.canvas.create_line(0, 0, 0, 0, fill=self.grid_color, tags="grid_h")
-        for _ in range(self.canvas_width - 1):
-            self.canvas.create_line(0, 0, 0, 0, fill=self.grid_color, tags="grid_v")
-        self._rescale_canvas()
-        self.canvas.tag_raise("grid_h", "art_sprite")
-        self.canvas.tag_raise("grid_v", "art_sprite")
-        self.center_canvas_view()
-
-    def center_canvas_view(self):
-        self.canvas.update_idletasks()
-        total_width, total_height = (
-            self.canvas_width * self.pixel_size,
-            self.canvas_height * self.pixel_size,
-        )
-        viewport_width, viewport_height = (
-            self.canvas.winfo_width(),
-            self.canvas.winfo_height(),
-        )
-        if viewport_width <= 1 or viewport_height <= 1:
-            self.root.after(50, self.center_canvas_view)
-            return
-        target_x, target_y = (total_width - viewport_width) / 2, (
-            total_height - viewport_height
-        ) / 2
-        s_region_str = self.canvas.cget("scrollregion")
-        if not s_region_str:
-            self._update_visible_canvas_image()
-            return
-        try:
-            s_x1, s_y1, s_x2, s_y2 = map(float, s_region_str.split())
-            total_scroll_width, total_scroll_height = s_x2 - s_x1, s_y2 - s_y1
-            if total_scroll_width > 0:
-                self.canvas.xview_moveto((target_x - s_x1) / total_scroll_width)
-            if total_scroll_height > 0:
-                self.canvas.yview_moveto((target_y - s_y1) / total_scroll_height)
-        except (ValueError, IndexError):
-            pass
-        self._update_visible_canvas_image()
-
-    def _update_visible_canvas_image(self):
-
-        if self._after_id_render:
-            self.root.after_cancel(self._after_id_render)
-            self._after_id_render = None
-
-        viewport_w, viewport_h = self.canvas.winfo_width(), self.canvas.winfo_height()
-        if viewport_w <= 1 or viewport_h <= 1:
-            self._after_id_render = self.root.after(
-                50, self._update_visible_canvas_image
-            )
-            return
-
-        if self._force_full_redraw or self._full_art_image_cache is None:
-            if self.show_canvas_background_var.get():
-                final_full = Image.new(
-                    "RGBA",
-                    (self.canvas_width, self.canvas_height),
-                    self._hex_to_rgb(self.canvas_bg_color) + (255,),
-                )
-            else:
-                bg_full = Image.new("RGBA", (self.canvas_width, self.canvas_height))
-                draw_bg, c1, c2 = (
-                    ImageDraw.Draw(bg_full),
-                    (224, 224, 224),
-                    (240, 240, 240),
-                )
-                for y in range(self.canvas_height):
-                    for x in range(self.canvas_width):
-                        draw_bg.point((x, y), fill=c1 if (x + y) % 2 == 0 else c2)
-                final_full = bg_full
-
-            e_alpha = 255 if not self.render_pixel_alpha_var.get() else None
-            for layer in self.layers:
-                if not layer.visible:
-                    continue
-                layer_img = Image.new(
-                    "RGBA", (self.canvas_width, self.canvas_height), (0, 0, 0, 0)
-                )
-                for (px, py), (hex_color, alpha) in layer.pixel_data.items():
-                    rgb = self._hex_to_rgb(hex_color)
-                    layer_img.putpixel((px, py), rgb + (e_alpha or alpha,))
-                final_full.alpha_composite(layer_img)
-
-            self._full_art_image_cache = final_full
-            self._force_full_redraw = False
-            self._dirty_bbox = None
-
-        elif self._dirty_bbox is not None:
-            min_x, min_y, max_x, max_y = self._dirty_bbox
-            width, height = max_x - min_x, max_y - min_y
-
-            if self.show_canvas_background_var.get():
-                dirty_final = Image.new(
-                    "RGBA",
-                    (width, height),
-                    self._hex_to_rgb(self.canvas_bg_color) + (255,),
-                )
-            else:
-                dirty_bg = Image.new("RGBA", (width, height))
-                draw_bg, c1, c2 = (
-                    ImageDraw.Draw(dirty_bg),
-                    (224, 224, 224),
-                    (240, 240, 240),
-                )
-                for y in range(height):
-                    for x in range(width):
-                        fill_c = c1 if ((x + min_x) + (y + min_y)) % 2 == 0 else c2
-                        draw_bg.point((x, y), fill=fill_c)
-                dirty_final = dirty_bg
-
-            e_alpha = 255 if not self.render_pixel_alpha_var.get() else None
-            for layer in self.layers:
-                if not layer.visible:
-                    continue
-                dirty_layer_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-                for (px, py), (hex_color, alpha) in layer.pixel_data.items():
-                    if min_x <= px < max_x and min_y <= py < max_y:
-                        rgb = self._hex_to_rgb(hex_color)
-                        dirty_layer_img.putpixel(
-                            (px - min_x, py - min_y), rgb + (e_alpha or alpha,)
-                        )
-                dirty_final.alpha_composite(dirty_layer_img)
-
-            self._full_art_image_cache.paste(dirty_final, (min_x, min_y))
-            self._dirty_bbox = None
-
-        if self._full_art_image_cache is None:
-            return
-
-        canvas_x_start, canvas_y_start = self.canvas.canvasx(0), self.canvas.canvasy(0)
-        px_start = max(0, math.floor(canvas_x_start / self.pixel_size))
-        py_start = max(0, math.floor(canvas_y_start / self.pixel_size))
-        px_end = min(
-            self.canvas_width,
-            math.ceil((canvas_x_start + viewport_w) / self.pixel_size),
-        )
-        py_end = min(
-            self.canvas_height,
-            math.ceil((canvas_y_start + viewport_h) / self.pixel_size),
-        )
-
-        if px_start >= px_end or py_start >= py_end:
-            self.canvas.itemconfig(self.art_sprite_canvas_item, image="")
-            self.art_sprite_image = None
-            return
-
-        art_image_cropped = self._full_art_image_cache.crop(
-            (px_start, py_start, px_end, py_end)
-        )
-        final_w, final_h = (px_end - px_start) * self.pixel_size, (
-            py_end - py_start
-        ) * self.pixel_size
-
-        if final_w <= 0 or final_h <= 0:
-            return
-
-        self.art_sprite_image = ImageTk.PhotoImage(
-            art_image_cropped.resize((final_w, final_h), Image.NEAREST)
-        )
-        self.canvas.itemconfig(self.art_sprite_canvas_item, image=self.art_sprite_image)
-        self.canvas.coords(
-            self.art_sprite_canvas_item,
-            px_start * self.pixel_size,
-            py_start * self.pixel_size,
-        )
-        self.canvas.tag_lower(self.art_sprite_canvas_item)
-
-    def get_pixel_coords(self, event_x, event_y):
-        canvas_x, canvas_y = self.canvas.canvasx(event_x), self.canvas.canvasy(event_y)
-        px, py = int(canvas_x / self.pixel_size), int(canvas_y / self.pixel_size)
-        return (
-            (px, py)
-            if 0 <= px < self.canvas_width and 0 <= py < self.canvas_height
-            else (None, None)
-        )
-
-    def draw_pixel(self, x, y, source_hex, source_alpha):
-        if x is None or y is None or not self.active_layer:
-            return
-        original_pixel = self.active_layer_data.get((x, y))
-        applied_hex, applied_alpha = source_hex, source_alpha
-
-        if (
-            self.color_blending_var.get()
-            and 0 < source_alpha < 255
-            and original_pixel
-            and original_pixel[1] > 0
-        ):
-            bg_hex, bg_a_int = original_pixel
-            fg_r, fg_g, fg_b = self._hex_to_rgb(source_hex)
-            bg_r, bg_g, bg_b = self._hex_to_rgb(bg_hex)
-            fa, ba = source_alpha / 255.0, bg_a_int / 255.0
-            out_a_norm = fa + ba * (1.0 - fa)
-            if out_a_norm > 0:
-                applied_alpha = min(255, int(round(out_a_norm * 255.0)))
-                r = min(
-                    255,
-                    max(0, int(round((fg_r * fa + bg_r * ba * (1 - fa)) / out_a_norm))),
-                )
-                g = min(
-                    255,
-                    max(0, int(round((fg_g * fa + bg_g * ba * (1 - fa)) / out_a_norm))),
-                )
-                b = min(
-                    255,
-                    max(0, int(round((fg_b * fa + bg_b * ba * (1 - fa)) / out_a_norm))),
-                )
-                applied_hex = self._rgb_to_hex(r, g, b)
-            else:
-                applied_alpha, applied_hex = 0, "transparent"
-
-        new_pixel_data = (applied_hex, applied_alpha) if applied_alpha > 0 else None
-        if original_pixel != new_pixel_data:
-            if new_pixel_data:
-                self.active_layer_data[(x, y)] = new_pixel_data
-            elif (x, y) in self.active_layer_data:
-                del self.active_layer_data[(x, y)]
-            self._update_dirty_bbox(x, y)
-
-    def _draw_line_between_pixels(self, x0, y0, x1, y1, color_hex, alpha, is_eraser):
-        for px, py in self._bresenham_line_pixels(x0, y0, x1, y1):
-            if (px, py) not in self.stroke_pixels_drawn_this_stroke:
-                self.draw_pixel(
-                    px,
-                    py,
-                    "transparent" if is_eraser else color_hex,
-                    0 if is_eraser else alpha,
-                )
-                self.stroke_pixels_drawn_this_stroke.add((px, py))
-
-    def flood_fill(self, start_x, start_y, new_color_hex, new_alpha):
-        if start_x is None or not self.active_layer:
-            return
-        target_data = self.active_layer_data.get((start_x, start_y), ("transparent", 0))
-        if target_data == (new_color_hex, new_alpha) and not (
-            self.color_blending_var.get() and 0 < new_alpha < 255
-        ):
-            return
-        if target_data == ("transparent", 0) and new_alpha == 0:
-            return
-
-        stack, processed = [(start_x, start_y)], set()
-        pixels_before = {}
-        while stack:
-            x, y = stack.pop()
-            if (
-                not (0 <= x < self.canvas_width and 0 <= y < self.canvas_height)
-                or (x, y) in processed
-            ):
-                continue
-
-            current_pixel_data = self.active_layer_data.get((x, y), ("transparent", 0))
-            if current_pixel_data == target_data:
-                pixels_before[(x, y)] = current_pixel_data
-                processed.add((x, y))
-                self.draw_pixel(x, y, new_color_hex, new_alpha)
-                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-                    stack.append((x + dx, y + dy))
-        if processed:
-            pixels_after = {
-                (x, y): self.active_layer_data.get((x, y)) for x, y in processed
-            }
-            action = PixelAction(self.active_layer_index, pixels_before, pixels_after)
-            self.add_action(action)
-            self._rescale_canvas()
-
-    def _get_brush_pixels(self, center_x, center_y):
-        offset = (self.brush_size - 1) // 2
-        start_x, start_y = center_x - offset, center_y - offset
-        for y_off in range(self.brush_size):
-            py = start_y + y_off
-            if 0 <= py < self.canvas_height:
-                for x_off in range(self.brush_size):
-                    px = start_x + x_off
-                    if 0 <= px < self.canvas_width:
-                        yield (px, py)
-
-    def _draw_preview_rect(self, x, y, is_eraser):
-        if x is None or y is None:
-            return
-        x0, y0 = x * self.pixel_size, y * self.pixel_size
-        x1, y1 = x0 + self.pixel_size, y0 + self.pixel_size
-        if self.show_canvas_background_var.get():
-            ultimate_bg_rgb = self._hex_to_rgb(self.canvas_bg_color)
-        else:
-            ultimate_bg_rgb = (224, 224, 224) if (x + y) % 2 == 0 else (240, 240, 240)
-        if is_eraser:
-            self.canvas.create_rectangle(
-                x0,
-                y0,
-                x1,
-                y1,
-                fill=self._rgb_to_hex(*ultimate_bg_rgb),
-                outline="#000000",
-                width=1,
-                tags="preview_stroke",
-            )
-            return
-        fg_rgb, fg_a_norm = (
-            self._hex_to_rgb(self.current_color),
-            self.current_alpha / 255.0,
-        )
-        if fg_a_norm == 1.0:
-            self.canvas.create_rectangle(
-                x0,
-                y0,
-                x1,
-                y1,
-                fill=self.current_color,
-                outline="",
-                tags="preview_stroke",
-            )
-            return
-        existing, blending = (
-            self.active_layer_data.get((x, y)),
-            self.color_blending_var.get(),
-        )
-        if not blending or not existing:
-            base_rgb = ultimate_bg_rgb
-        else:
-            bg_hex, bg_a_int = existing
-            bg_rgb = self._hex_to_rgb(bg_hex)
-            bg_a_norm = (bg_a_int / 255.0) if self.render_pixel_alpha_var.get() else 1.0
-            r = bg_rgb[0] * bg_a_norm + ultimate_bg_rgb[0] * (1.0 - bg_a_norm)
-            g = bg_rgb[1] * bg_a_norm + ultimate_bg_rgb[1] * (1.0 - bg_a_norm)
-            b = bg_rgb[2] * bg_a_norm + ultimate_bg_rgb[2] * (1.0 - bg_a_norm)
-            base_rgb = (r, g, b)
-        r_out = fg_rgb[0] * fg_a_norm + base_rgb[0] * (1.0 - fg_a_norm)
-        g_out = fg_rgb[1] * fg_a_norm + base_rgb[1] * (1.0 - fg_a_norm)
-        b_out = fg_rgb[2] * fg_a_norm + base_rgb[2] * (1.0 - fg_a_norm)
-        final_rgb = tuple(
-            min(255, max(0, int(round(c)))) for c in (r_out, g_out, b_out)
-        )
-        self.canvas.create_rectangle(
-            x0,
-            y0,
-            x1,
-            y1,
-            fill=self._rgb_to_hex(*final_rgb),
-            outline="",
-            tags="preview_stroke",
-        )
-
-    def _draw_preview_brush(self, center_x, center_y, is_eraser):
-        for px, py in self._get_brush_pixels(center_x, center_y):
-            self._draw_preview_rect(px, py, is_eraser)
-
-    def _bresenham_line_pixels(self, x0, y0, x1, y1):
-        dx, dy = abs(x1 - x0), abs(y1 - y0)
-        sx, sy = (1 if x0 < x1 else -1), (1 if y0 < y1 else -1)
-        err = dx - dy
-        while True:
-            yield (x0, y0)
-            if x0 == x1 and y0 == y1:
-                break
-            e2 = 2 * err
-            if e2 > -dy:
-                err -= dy
-                x0 += sx
-            if e2 < dx:
-                err += dx
-                y0 += sy
-
-    def start_draw(self, event):
-        px, py = self.get_pixel_coords(event.x, event.y)
-        if px is None or not self.active_layer:
-            return
-        if self.eyedropper_mode:
-            self.pick_color_from_canvas_tool(px, py)
-            return
-
-        if not self.active_layer.visible:
-            messagebox.showinfo(
-                "Hidden Layer",
-                "You cannot draw on a hidden layer. Please make the layer visible first.",
-                parent=self.root,
-            )
-            return
-
-        self.drawing = True
-        self.stroke_pixels_drawn_this_stroke.clear()
-        tool = self.tool_var.get()
-        if tool == "shape":
-            self.start_shape_point = (px, py)
-        else:
-            self.last_draw_pixel_x, self.last_draw_pixel_y = px, py
-            if tool == "fill":
-                self.flood_fill(px, py, self.current_color, self.current_alpha)
-            else:
-                self._draw_preview_brush(px, py, tool == "eraser")
-                for brush_px, brush_py in self._get_brush_pixels(px, py):
-                    self.stroke_pixels_drawn_this_stroke.add((brush_px, brush_py))
-
-    def draw(self, event):
-        if not self.drawing or self.eyedropper_mode:
-            return
-        curr_px, curr_py = self.get_pixel_coords(event.x, event.y)
-        tool = self.tool_var.get()
-        if tool == "shape":
-            if curr_px is None or self.start_shape_point is None:
-                return
-            if self.preview_shape_item:
-                self.canvas.delete(self.preview_shape_item)
-            x0, y0 = self.start_shape_point
-            shape_type = self.shape_type_var.get()
-            lock_aspect = self.lock_aspect_var.get() and (
-                str(self.lock_aspect_checkbox.cget("state")) == "normal"
-            )
-            if shape_type == "Line":
-                x_s, y_s, x_c, y_c = (
-                    (x0 + 0.5) * self.pixel_size,
-                    (y0 + 0.5) * self.pixel_size,
-                    (curr_px + 0.5) * self.pixel_size,
-                    (curr_py + 0.5) * self.pixel_size,
-                )
-                self.preview_shape_item = self.canvas.create_line(
-                    x_s, y_s, x_c, y_c, fill=self.current_color, width=1, dash=(4, 2)
-                )
-            elif shape_type == "Rectangle":
-                ex, ey = curr_px, curr_py
-                if lock_aspect:
-                    side = max(abs(curr_px - x0), abs(curr_py - y0))
-                    ex = x0 + side * (-1 if curr_px < x0 else 1)
-                    ey = y0 + side * (-1 if curr_py < y0 else 1)
-                c_x0, c_y0 = (
-                    min(x0, ex) * self.pixel_size,
-                    min(y0, ey) * self.pixel_size,
-                )
-                c_x1, c_y1 = (max(x0, ex) + 1) * self.pixel_size, (
-                    max(y0, ey) + 1
-                ) * self.pixel_size
-                self.preview_shape_item = self.canvas.create_rectangle(
-                    c_x0, c_y0, c_x1, c_y1, outline=self.current_color, dash=(4, 2)
-                )
-            elif shape_type == "Ellipse":
-                cx, cy = (x0 + 0.5) * self.pixel_size, (y0 + 0.5) * self.pixel_size
-                rx_u, ry_u = abs((curr_px + 0.5) * self.pixel_size - cx), abs(
-                    (curr_py + 0.5) * self.pixel_size - cy
-                )
-                rx_f, ry_f = (
-                    (max(rx_u, ry_u), max(rx_u, ry_u)) if lock_aspect else (rx_u, ry_u)
-                )
-                self.preview_shape_item = self.canvas.create_oval(
-                    cx - rx_f,
-                    cy - ry_f,
-                    cx + rx_f,
-                    cy + ry_f,
-                    outline=self.current_color,
-                    dash=(4, 2),
-                )
-            if self.preview_shape_item:
-                self.canvas.tag_raise(self.preview_shape_item)
-        elif tool != "fill":
-            if curr_px is None:
-                self.last_draw_pixel_x = self.last_draw_pixel_y = None
-                return
-            if (curr_px, curr_py) == (self.last_draw_pixel_x, self.last_draw_pixel_y):
-                return
-            is_eraser = tool == "eraser"
-            if self.last_draw_pixel_x is not None:
-                for p_x, p_y in self._bresenham_line_pixels(
-                    self.last_draw_pixel_x, self.last_draw_pixel_y, curr_px, curr_py
-                ):
-                    for brush_px, brush_py in self._get_brush_pixels(p_x, p_y):
-                        if (
-                            brush_px,
-                            brush_py,
-                        ) not in self.stroke_pixels_drawn_this_stroke:
-                            self.stroke_pixels_drawn_this_stroke.add(
-                                (brush_px, brush_py)
-                            )
-                            self._draw_preview_rect(brush_px, brush_py, is_eraser)
-            self.last_draw_pixel_x, self.last_draw_pixel_y = curr_px, curr_py
-
-    def stop_draw(self, event):
-        if not self.drawing or not self.active_layer:
-            return
-        self.drawing = False
-        self.canvas.delete("preview_stroke")
-        tool = self.tool_var.get()
-
-        pixels_to_process = set()
-        pixels_before = {}
-
-        if tool == "shape":
-            if self.preview_shape_item:
-                self.canvas.delete(self.preview_shape_item)
-                self.preview_shape_item = None
-            end_px, end_py = self.get_pixel_coords(event.x, event.y)
-            if self.start_shape_point is None or end_px is None:
-                self.start_shape_point = None
-                return
-            x0, y0 = self.start_shape_point
-            shape_type = self.shape_type_var.get()
-            lock_aspect = self.lock_aspect_var.get() and (
-                str(self.lock_aspect_checkbox.cget("state")) == "normal"
-            )
-
-            if shape_type == "Line":
-                pixels_to_process.update(
-                    self._bresenham_line_pixels(x0, y0, end_px, end_py)
-                )
-            elif shape_type == "Rectangle":
-                ex, ey = end_px, end_py
-                if lock_aspect:
-                    side = max(abs(end_px - x0), abs(end_py - y0))
-                    ex = x0 + side * (-1 if end_px < x0 else 1)
-                    ey = y0 + side * (-1 if end_py < y0 else 1)
-                xs, ys, xe, ye = min(x0, ex), min(y0, ey), max(x0, ex), max(y0, ey)
-
-                if self.fill_shape_var.get():
-                    for y in range(ys, ye + 1):
-                        for x in range(xs, xe + 1):
-                            pixels_to_process.add((x, y))
-                else:
-                    for x in range(xs, xe + 1):
-                        pixels_to_process.add((x, ys))
-                        pixels_to_process.add((x, ye))
-                    for y in range(ys + 1, ye):
-                        pixels_to_process.add((xs, y))
-                        pixels_to_process.add((xe, y))
-
-            elif shape_type == "Ellipse":
-                rx_u, ry_u = abs(end_px - x0), abs(end_py - y0)
-                if lock_aspect:
-                    rx = ry = max(rx_u, ry_u)
-                else:
-                    rx, ry = rx_u, ry_u
-
-                if self.fill_shape_var.get():
-                    if rx == 0 and ry == 0:
-                        pixels_to_process.add((x0, y0))
-                    else:
-                        for y_offset in range(-ry, ry + 1):
-                            for x_offset in range(-rx, rx + 1):
-                                val = ((x_offset / rx) ** 2 if rx > 0 else 0) + (
-                                    (y_offset / ry) ** 2 if ry > 0 else 0
-                                )
-                                if val <= 1:
-                                    pixels_to_process.add(
-                                        (x0 + x_offset, y0 + y_offset)
-                                    )
-                else:
-                    full_ellipse = set()
-                    inner_ellipse = set()
-                    if rx > 0 and ry > 0:
-                        for y_offset in range(-ry, ry + 1):
-                            for x_offset in range(-rx, rx + 1):
-                                if (x_offset / rx) ** 2 + (y_offset / ry) ** 2 <= 1:
-                                    full_ellipse.add((x0 + x_offset, y0 + y_offset))
-                        rx_inner, ry_inner = max(0, rx - 1), max(0, ry - 1)
-
-                        if rx_inner > 0 and ry_inner > 0:
-                            for y_offset in range(-ry_inner, ry_inner + 1):
-                                for x_offset in range(-rx_inner, rx_inner + 1):
-                                    if (x_offset / rx_inner) ** 2 + (
-                                        y_offset / ry_inner
-                                    ) ** 2 <= 1:
-                                        inner_ellipse.add(
-                                            (x0 + x_offset, y0 + y_offset)
-                                        )
-                        pixels_to_process.update(full_ellipse - inner_ellipse)
-                    else:
-                        pixels_to_process.update(
-                            self._bresenham_line_pixels(
-                                x0 - rx, y0 - ry, x0 + rx, y0 + ry
-                            )
-                        )
-
-            if pixels_to_process:
-                for px, py in pixels_to_process:
-                    pixels_before[(px, py)] = self.active_layer_data.get((px, py))
-
-            for px, py in pixels_to_process:
-                self.draw_pixel(px, py, self.current_color, self.current_alpha)
-            self.start_shape_point = None
-
-        elif tool in ["pencil", "eraser"]:
-            pixels_to_process = self.stroke_pixels_drawn_this_stroke.copy()
-
-            if pixels_to_process:
-                for px, py in pixels_to_process:
-                    pixels_before[(px, py)] = self.active_layer_data.get((px, py))
-
-                is_eraser = tool == "eraser"
-                color, alpha = (
-                    ("transparent", 0)
-                    if is_eraser
-                    else (self.current_color, self.current_alpha)
-                )
-                for px, py in pixels_to_process:
-                    self.draw_pixel(px, py, color, alpha)
-            self.last_draw_pixel_x = self.last_draw_pixel_y = None
-
-        if pixels_to_process:
-            pixels_after = {
-                (px, py): self.active_layer_data.get((px, py))
-                for px, py in pixels_to_process
-            }
-            action = PixelAction(self.active_layer_index, pixels_before, pixels_after)
-            self.add_action(action)
-            self._rescale_canvas()
-
-    def _core_pick_color_at_pixel(self, px, py):
-        if px is None:
-            return False
-
-        for layer in reversed(self.layers):
-            if not layer.visible:
-                continue
-            pixel_data = layer.pixel_data.get((px, py))
-            if pixel_data:
-                color, alpha = pixel_data
-                if alpha > 0:
-                    self.current_color, self.current_alpha = color, alpha
-                    self._update_color_picker_from_app_state()
-                    return True
-        return False
-
-    def start_mmb_eyedropper(self, event):
-        px, py = self.get_pixel_coords(event.x, event.y)
-        if px is None:
-            return
-        self.mmb_eyedropper_active = True
-        self.original_cursor_before_mmb = self.canvas.cget("cursor")
-        self.canvas.configure(cursor="dotbox")
-        self._core_pick_color_at_pixel(px, py)
-
-    def mmb_eyedropper_motion(self, event):
-        if self.mmb_eyedropper_active:
-            self._core_pick_color_at_pixel(*self.get_pixel_coords(event.x, event.y))
-
-    def stop_mmb_eyedropper(self, event):
-        if self.mmb_eyedropper_active:
-            self.mmb_eyedropper_active = False
-            self.canvas.configure(cursor=self.original_cursor_before_mmb)
-
-    def start_pan(self, event):
-        self.panning = True
-        self.original_cursor_before_pan = self.canvas.cget("cursor")
-        self.canvas.config(cursor="fleur")
-        self.canvas.scan_mark(event.x, event.y)
-
-    def pan_motion(self, event):
-        self.canvas.scan_dragto(event.x, event.y, gain=1)
-        self._update_visible_canvas_image()
-
-    def stop_pan(self, event):
-        self.panning = False
-        self.canvas.config(cursor=self.original_cursor_before_pan)
 
     def change_tool(self):
         new_tool = self.tool_var.get()
@@ -1623,23 +761,26 @@ class PixelArtApp:
         self.current_tool = new_tool
         if self.eyedropper_mode:
             self.toggle_eyedropper()
-        if self.current_tool != "shape" and self.preview_shape_item:
-            self.canvas.delete(self.preview_shape_item)
-            self.preview_shape_item = None
-            self.start_shape_point = None
-            self.drawing = False
+        if self.current_tool != "shape" and self.pixel_canvas.preview_shape_item:
+            self.pixel_canvas.canvas.delete(self.pixel_canvas.preview_shape_item)
+            self.pixel_canvas.preview_shape_item = (
+                self.pixel_canvas.start_shape_point
+            ) = None
+            self.pixel_canvas.drawing = False
         self._update_shape_controls_state()
         self._update_brush_controls_state()
 
     def toggle_eyedropper(self):
         self.eyedropper_mode = not self.eyedropper_mode
-        self.canvas.configure(cursor="dotbox" if self.eyedropper_mode else "")
+        self.pixel_canvas.canvas.configure(
+            cursor="dotbox" if self.eyedropper_mode else ""
+        )
         if self.eyedropper_mode and self.tool_var.get() == "fill":
             self.tool_var.set("pencil")
             self.change_tool()
 
     def pick_color_from_canvas_tool(self, px, py):
-        self._core_pick_color_at_pixel(px, py)
+        self.pixel_canvas._core_pick_color_at_pixel(px, py)
         self.toggle_eyedropper()
 
     def choose_canvas_background_color(self):
@@ -1648,9 +789,7 @@ class PixelArtApp:
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.resizable(False, False)
-
         dialog.geometry("250x325")
-
         main_frame = ttk.Frame(dialog, padding=15)
         main_frame.pack(fill=tk.BOTH, expand=True)
         state = {"hex": self.canvas_bg_color}
@@ -1661,20 +800,17 @@ class PixelArtApp:
         color_wheel = ColorWheelPicker(
             main_frame, on_dialog_color_change, show_alpha=False, show_preview=True
         )
-
         color_wheel.set_color(self.canvas_bg_color)
         color_wheel.pack()
-
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(side=tk.BOTTOM, pady=(15, 0))
 
         def apply_choice():
             if self.canvas_bg_color != state["hex"]:
                 self.canvas_bg_color = state["hex"]
-                self._force_full_redraw = True
                 self._update_canvas_workarea_color()
                 if self.show_canvas_background_var.get():
-                    self._update_visible_canvas_image()
+                    self.pixel_canvas.force_redraw()
             dialog.destroy()
 
         ttk.Button(button_frame, text="OK", command=apply_choice).pack(
@@ -1683,50 +819,47 @@ class PixelArtApp:
         ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(
             side=tk.LEFT, padx=5
         )
-
         dialog.bind("<Return>", lambda e: apply_choice())
         dialog.bind("<Escape>", lambda e: dialog.destroy())
 
     def toggle_grid_visibility(self):
-        self._rescale_canvas()
+        self.pixel_canvas.rescale_canvas()
 
     def toggle_canvas_background_display(self):
         self._update_canvas_workarea_color()
-        self._force_full_redraw = True
-        self._rescale_canvas()
+        self.pixel_canvas.force_redraw()
         self._update_save_background_menu_state()
 
     def toggle_pixel_alpha_rendering(self):
-        self._force_full_redraw = True
-        self._rescale_canvas()
+        self.pixel_canvas.force_redraw()
 
     def new_canvas(self):
-        has_pixels = any(layer.pixel_data for layer in self.layers)
-        if not has_pixels or messagebox.askokcancel(
+        if any(
+            layer.pixel_data for layer in self.layers
+        ) and not messagebox.askokcancel(
             "New", "Clear canvas? Unsaved changes may be lost."
         ):
-            self._initialize_layers()
-            self.current_filename = None
-            self.canvas_bg_color = "#FFFFFF"
-            self.root.title("Pixel Art Drawing App")
-            self._update_canvas_workarea_color()
-            self._clear_history()
-            self._force_full_redraw = True
-            self.create_canvas()
-            self._update_layers_ui()
+            return
+        self._initialize_layers()
+        self.current_filename = None
+        self.canvas_bg_color = "#FFFFFF"
+        self.root.title("Pixel Art Drawing App")
+        self._update_canvas_workarea_color()
+        self._clear_history()
+        self.create_canvas()
+        self._update_layers_ui()
 
     def open_file(self):
-        has_pixels = any(layer.pixel_data for layer in self.layers)
-        if has_pixels and not messagebox.askokcancel(
+        if any(
+            layer.pixel_data for layer in self.layers
+        ) and not messagebox.askokcancel(
             "Open", "Clear canvas? Unsaved changes may be lost."
         ):
             return
-        filename = filedialog.askopenfilename(
+        if filename := filedialog.askopenfilename(
             title="Open PNG", filetypes=[("PNG", "*.png"), ("All", "*.*")]
-        )
-        if not filename:
-            return
-        self._load_image_from_path(filename)
+        ):
+            self._load_image_from_path(filename)
 
     def _load_image_from_path(self, filename):
         try:
@@ -1734,23 +867,20 @@ class PixelArtApp:
                 img = img.convert("RGBA")
                 old_w, old_h = self.canvas_width, self.canvas_height
                 self.canvas_width, self.canvas_height = img.width, img.height
-
                 self._initialize_layers()
                 self.layers[0].name = os.path.basename(filename)
-                active_layer_data = self.layers[0].pixel_data
-                active_layer_data.clear()
-
+                self.layers[0].pixel_data.clear()
                 for y in range(img.height):
                     for x in range(img.width):
                         r, g, b, a = img.getpixel((x, y))
                         if a > 0:
-                            active_layer_data[(x, y)] = (self._rgb_to_hex(r, g, b), a)
-
+                            self.layers[0].pixel_data[(x, y)] = (
+                                rgb_to_hex(r, g, b),
+                                a,
+                            )
                 self._clear_history()
-                self._force_full_redraw = True
                 self.create_canvas()
                 self._update_layers_ui()
-
                 self.current_filename = filename
                 self.root.title(
                     f"Pixel Art Drawing App - {os .path .basename (filename )}"
@@ -1765,30 +895,30 @@ class PixelArtApp:
             messagebox.showerror("Error", f"Failed to open: {e }")
 
     def save_file(self):
-        if self.current_filename:
+        (
             self.export_to_png(self.current_filename)
-        else:
-            self.export_png()
+            if self.current_filename
+            else self.export_png()
+        )
 
     def export_png(self):
-        filename = filedialog.asksaveasfilename(
+        if filename := filedialog.asksaveasfilename(
             title="Export PNG As", defaultextension=".png", filetypes=[("PNG", "*.png")]
-        )
-        if filename:
+        ):
             self.export_to_png(filename)
 
     def export_to_png(self, filename):
         try:
-            if self.show_canvas_background_var.get() and self.save_background_var.get():
-                bg_color_tuple = self._hex_to_rgb(self.canvas_bg_color) + (255,)
-                img = Image.new(
-                    "RGBA", (self.canvas_width, self.canvas_height), bg_color_tuple
-                )
-            else:
-                img = Image.new(
-                    "RGBA", (self.canvas_width, self.canvas_height), (0, 0, 0, 0)
-                )
-
+            img = Image.new(
+                "RGBA",
+                (self.canvas_width, self.canvas_height),
+                (
+                    hex_to_rgb(self.canvas_bg_color) + (255,)
+                    if self.show_canvas_background_var.get()
+                    and self.save_background_var.get()
+                    else (0, 0, 0, 0)
+                ),
+            )
             for layer in self.layers:
                 if not layer.visible:
                     continue
@@ -1797,9 +927,8 @@ class PixelArtApp:
                 )
                 for (x, y), (h, a) in layer.pixel_data.items():
                     if h != "transparent" and a > 0:
-                        layer_img.putpixel((x, y), self._hex_to_rgb(h) + (a,))
+                        layer_img.putpixel((x, y), hex_to_rgb(h) + (a,))
                 img = Image.alpha_composite(img, layer_img)
-
             img.save(filename, "PNG")
             if filename == self.current_filename or self.current_filename is None:
                 self.current_filename = filename
