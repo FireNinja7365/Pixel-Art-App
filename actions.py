@@ -1,3 +1,6 @@
+from utilities import blend_colors
+
+
 class Action:
 
     def undo(self, app):
@@ -23,7 +26,8 @@ class PixelAction(Action):
                 layer_data[(x, y)] = data_before
             elif (x, y) in layer_data:
                 del layer_data[(x, y)]
-            app._update_dirty_bbox(x, y)
+
+            app.pixel_canvas._update_dirty_bbox(x, y)
 
     def redo(self, app):
         layer_data = app.layers[self.layer_index].pixel_data
@@ -32,7 +36,8 @@ class PixelAction(Action):
                 layer_data[(x, y)] = data_after
             elif (x, y) in layer_data:
                 del layer_data[(x, y)]
-            app._update_dirty_bbox(x, y)
+
+            app.pixel_canvas._update_dirty_bbox(x, y)
 
 
 class AddLayerAction(Action):
@@ -61,9 +66,6 @@ class DuplicateLayerAction(Action):
     def undo(self, app):
         app.layers.pop(self.index)
         app.active_layer_index = self.prev_active_index
-        app._force_full_redraw = True
-        app._rescale_canvas()
-        app._update_layers_ui()
 
     def redo(self, app):
         app.layers.insert(self.index, self.layer_obj)
@@ -121,9 +123,16 @@ class RenameLayerAction(Action):
 
 class MergeLayerAction(Action):
 
-    def __init__(self, upper_layer_obj, lower_layer_obj, upper_layer_index):
+    def __init__(
+        self,
+        upper_layer_obj,
+        lower_layer_obj,
+        merged_lower_layer_obj,
+        upper_layer_index,
+    ):
         self.upper_layer_obj = upper_layer_obj
         self.lower_layer_obj = lower_layer_obj
+        self.merged_lower_layer_obj = merged_lower_layer_obj
         self.upper_layer_index = upper_layer_index
 
     def undo(self, app):
@@ -133,62 +142,8 @@ class MergeLayerAction(Action):
         app.active_layer_index = self.upper_layer_index
 
     def redo(self, app):
-        upper = app.layers[self.upper_layer_index]
-        lower = app.layers[self.upper_layer_index - 1]
 
-        merged_data = lower.pixel_data.copy()
-        for (x, y), (upper_hex, upper_alpha) in upper.pixel_data.items():
-            if upper_alpha == 0:
-                continue
-
-            original_pixel = merged_data.get((x, y))
-            final_hex, final_alpha = upper_hex, upper_alpha
-
-            if (
-                app.color_blending_var.get()
-                and 0 < upper_alpha < 255
-                and original_pixel
-                and original_pixel[1] > 0
-            ):
-                bg_hex, bg_a_int = original_pixel
-                fg_r, fg_g, fg_b = app._hex_to_rgb(upper_hex)
-                bg_r, bg_g, bg_b = app._hex_to_rgb(bg_hex)
-
-                fa, ba = upper_alpha / 255.0, bg_a_int / 255.0
-                out_a_norm = fa + ba * (1.0 - fa)
-
-                if out_a_norm > 0:
-                    final_alpha = min(255, int(round(out_a_norm * 255.0)))
-                    r = min(
-                        255,
-                        max(
-                            0,
-                            int(round((fg_r * fa + bg_r * ba * (1 - fa)) / out_a_norm)),
-                        ),
-                    )
-                    g = min(
-                        255,
-                        max(
-                            0,
-                            int(round((fg_g * fa + bg_g * ba * (1 - fa)) / out_a_norm)),
-                        ),
-                    )
-                    b = min(
-                        255,
-                        max(
-                            0,
-                            int(round((fg_b * fa + bg_b * ba * (1 - fa)) / out_a_norm)),
-                        ),
-                    )
-                    final_hex = app._rgb_to_hex(r, g, b)
-                else:
-                    final_alpha = 0
-
-            if final_alpha > 0:
-                merged_data[(x, y)] = (final_hex, final_alpha)
-            elif (x, y) in merged_data:
-                del merged_data[(x, y)]
-
-        lower.pixel_data = merged_data
         app.layers.pop(self.upper_layer_index)
+        app.layers.pop(self.upper_layer_index - 1)
+        app.layers.insert(self.upper_layer_index - 1, self.merged_lower_layer_obj)
         app.active_layer_index = self.upper_layer_index - 1
