@@ -1,0 +1,1 @@
+python -m pip install Pillow tkinterdnd2 numpy Cython
