@@ -1,6 +1,3 @@
-from utilities import blend_colors
-
-
 class Action:
 
     def undo(self, app):
