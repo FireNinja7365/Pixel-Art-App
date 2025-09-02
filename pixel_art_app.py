@@ -21,6 +21,7 @@ from actions import (
     MergeLayerAction,
 )
 from utilities import hex_to_rgb, rgb_to_hex, handle_slider_click
+import canvas_cython_helpers
 
 
 class Layer:
@@ -627,7 +628,7 @@ class PixelArtApp:
                 and original_pixel[1] > 0
             ):
                 bg_hex, bg_a_int = original_pixel
-                final_hex, final_alpha = blend_colors(
+                final_hex, final_alpha = canvas_cython_helpers.blend_colors_cy(
                     upper_hex, upper_alpha, bg_hex, bg_a_int
                 )
 
