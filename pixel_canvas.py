@@ -5,7 +5,9 @@ import math
 from collections import defaultdict
 
 from actions import PixelAction
-from utilities import blend_colors, bresenham_line, hex_to_rgb, rgb_to_hex
+
+
+import canvas_cython_helpers
 
 
 class PixelCanvas(ttk.Frame):
@@ -184,94 +186,58 @@ class PixelCanvas(ttk.Frame):
         if self._after_id_render:
             self.app.root.after_cancel(self._after_id_render)
         self._after_id_render = None
+
         viewport_w, viewport_h = self.canvas.winfo_width(), self.canvas.winfo_height()
         if viewport_w <= 1 or viewport_h <= 1:
             self._after_id_render = self.app.root.after(
                 50, self._update_visible_canvas_image
             )
             return
+
+        visible_layers_data = [
+            layer.pixel_data for layer in self.app.layers if layer.visible
+        ]
+        use_bg = self.app.show_canvas_background_var.get()
+        bg_rgb = canvas_cython_helpers.hex_to_rgb_cy(self.app.canvas_bg_color)
+        render_alpha = self.app.render_pixel_alpha_var.get()
+
         if self._force_full_redraw or self._full_art_image_cache is None:
-            if self.app.show_canvas_background_var.get():
-                final_full = Image.new(
-                    "RGBA",
-                    (self.app.canvas_width, self.app.canvas_height),
-                    hex_to_rgb(self.app.canvas_bg_color) + (255,),
-                )
-            else:
-                bg_full = Image.new(
-                    "RGBA", (self.app.canvas_width, self.app.canvas_height)
-                )
-                draw_bg, c1, c2 = (
-                    ImageDraw.Draw(bg_full),
-                    (224, 224, 224),
-                    (240, 240, 240),
-                )
-                for y in range(self.app.canvas_height):
-                    for x in range(self.app.canvas_width):
-                        draw_bg.point((x, y), fill=c1 if (x + y) % 2 == 0 else c2)
-                final_full = bg_full
-            e_alpha = 255 if not self.app.render_pixel_alpha_var.get() else None
-            for layer in self.app.layers:
-                if not layer.visible:
-                    continue
-                layer_img = Image.new(
-                    "RGBA",
-                    (self.app.canvas_width, self.app.canvas_height),
-                    (0, 0, 0, 0),
-                )
-                for (px, py), (hex_color, alpha) in layer.pixel_data.items():
-                    layer_img.putpixel(
-                        (px, py), hex_to_rgb(hex_color) + (e_alpha or alpha,)
-                    )
-                final_full.alpha_composite(layer_img)
-            self._full_art_image_cache, self._force_full_redraw, self._dirty_bbox = (
-                final_full,
-                False,
-                None,
+
+            image_buffer = canvas_cython_helpers.render_image(
+                self.app.canvas_width,
+                self.app.canvas_height,
+                visible_layers_data,
+                use_bg,
+                bg_rgb,
+                render_alpha,
             )
-        elif self._dirty_bbox is not None:
-            min_x, min_y, max_x, max_y = self._dirty_bbox
-            width, height = max_x - min_x, max_y - min_y
-            if self.app.show_canvas_background_var.get():
-                dirty_final = Image.new(
-                    "RGBA",
-                    (width, height),
-                    hex_to_rgb(self.app.canvas_bg_color) + (255,),
-                )
-            else:
-                dirty_bg = Image.new("RGBA", (width, height))
-                draw_bg, c1, c2 = (
-                    ImageDraw.Draw(dirty_bg),
-                    (224, 224, 224),
-                    (240, 240, 240),
-                )
-                for y in range(height):
-                    for x in range(width):
-                        draw_bg.point(
-                            (x, y),
-                            fill=c1 if ((x + min_x) + (y + min_y)) % 2 == 0 else c2,
-                        )
-                dirty_final = dirty_bg
-            e_alpha = 255 if not self.app.render_pixel_alpha_var.get() else None
-            for layer in self.app.layers:
-                if not layer.visible:
-                    continue
-                dirty_layer_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-                for (px, py), (hex_color, alpha) in layer.pixel_data.items():
-                    if min_x <= px < max_x and min_y <= py < max_y:
-                        dirty_layer_img.putpixel(
-                            (px - min_x, py - min_y),
-                            hex_to_rgb(hex_color) + (e_alpha or alpha,),
-                        )
-                dirty_final.alpha_composite(dirty_layer_img)
-            self._full_art_image_cache.paste(dirty_final, (min_x, min_y))
+            self._full_art_image_cache = Image.fromarray(image_buffer, "RGBA")
+            self._force_full_redraw = False
             self._dirty_bbox = None
+
+        elif self._dirty_bbox is not None:
+
+            dirty_buffer = canvas_cython_helpers.render_image(
+                self.app.canvas_width,
+                self.app.canvas_height,
+                visible_layers_data,
+                use_bg,
+                bg_rgb,
+                render_alpha,
+                self._dirty_bbox,
+            )
+            dirty_image = Image.fromarray(dirty_buffer, "RGBA")
+            self._full_art_image_cache.paste(
+                dirty_image, (self._dirty_bbox[0], self._dirty_bbox[1])
+            )
+            self._dirty_bbox = None
+
         if self._full_art_image_cache is None:
             return
+
         canvas_x_start, canvas_y_start = self.canvas.canvasx(0), self.canvas.canvasy(0)
-        px_start, py_start = max(
-            0, math.floor(canvas_x_start / self.app.pixel_size)
-        ), max(0, math.floor(canvas_y_start / self.app.pixel_size))
+        px_start = max(0, math.floor(canvas_x_start / self.app.pixel_size))
+        py_start = max(0, math.floor(canvas_y_start / self.app.pixel_size))
         px_end = min(
             self.app.canvas_width,
             math.ceil((canvas_x_start + viewport_w) / self.app.pixel_size),
@@ -280,18 +246,22 @@ class PixelCanvas(ttk.Frame):
             self.app.canvas_height,
             math.ceil((canvas_y_start + viewport_h) / self.app.pixel_size),
         )
+
         if px_start >= px_end or py_start >= py_end:
             self.canvas.itemconfig(self.art_sprite_canvas_item, image=""),
             self.art_sprite_image = None
             return
+
         art_image_cropped = self._full_art_image_cache.crop(
             (px_start, py_start, px_end, py_end)
         )
         final_w, final_h = (px_end - px_start) * self.app.pixel_size, (
             py_end - py_start
         ) * self.app.pixel_size
+
         if final_w <= 0 or final_h <= 0:
             return
+
         self.art_sprite_image = ImageTk.PhotoImage(
             art_image_cropped.resize((final_w, final_h), Image.NEAREST)
         )
@@ -401,7 +371,8 @@ class PixelCanvas(ttk.Frame):
             and original_pixel[1] > 0
         ):
             bg_hex, bg_a_int = original_pixel
-            applied_hex, applied_alpha = blend_colors(
+
+            applied_hex, applied_alpha = canvas_cython_helpers.blend_colors_cy(
                 source_hex, source_alpha, bg_hex, bg_a_int
             )
 
@@ -425,34 +396,29 @@ class PixelCanvas(ttk.Frame):
                         yield (px, py)
 
     def _get_composite_pixel_color_under_layer(self, x, y, layer_index):
-        if self.app.show_canvas_background_var.get():
-            bg_rgb = hex_to_rgb(self.app.canvas_bg_color)
-        else:
-            bg_rgb = (224, 224, 224) if (x + y) % 2 == 0 else (240, 240, 240)
 
-        composite_rgb = bg_rgb
-        for i in range(layer_index):
-            layer = self.app.layers[i]
-            if not layer.visible:
-                continue
-            pixel_data = layer.pixel_data.get((x, y))
-            if pixel_data and pixel_data[1] > 0:
-                hex_color, alpha = pixel_data
-                alpha_to_use = alpha if self.app.render_pixel_alpha_var.get() else 255
-                if alpha_to_use > 0:
-                    fg_rgb = hex_to_rgb(hex_color)
-                    alpha_norm = alpha_to_use / 255.0
-                    composite_rgb = tuple(
-                        fg_rgb[c] * alpha_norm + composite_rgb[c] * (1 - alpha_norm)
-                        for c in range(3)
-                    )
-        return composite_rgb
+        all_layers_data = [l.pixel_data for l in self.app.layers if l.visible]
+        use_bg = self.app.show_canvas_background_var.get()
+        bg_rgb = canvas_cython_helpers.hex_to_rgb_cy(self.app.canvas_bg_color)
+        render_alpha = self.app.render_pixel_alpha_var.get()
+
+        visible_layer_map = [i for i, l in enumerate(self.app.layers) if l.visible]
+        if layer_index not in visible_layer_map:
+
+            return self._get_composite_pixel_color_under_layer_py(x, y, layer_index)
+
+        cython_layer_index = visible_layer_map.index(layer_index)
+
+        return canvas_cython_helpers.composite_pixel_stack_cy(
+            x, y, all_layers_data, cython_layer_index, use_bg, bg_rgb, render_alpha
+        )
 
     def _calculate_preview_pixel_rgba(self, x, y, is_eraser, tool_options):
         active_layer_index = tool_options["active_layer_index"]
-        base_rgb = self._get_composite_pixel_color_under_layer(x, y, active_layer_index)
-        applied_hex, applied_alpha = None, 0
 
+        base_rgb = self._get_composite_pixel_color_under_layer(x, y, active_layer_index)
+
+        applied_hex, applied_alpha = None, 0
         if not is_eraser:
             source_hex, source_alpha = tool_options["color"], tool_options["alpha"]
             applied_hex, applied_alpha = source_hex, source_alpha
@@ -464,7 +430,7 @@ class PixelCanvas(ttk.Frame):
                 and existing_pixel[1] > 0
             ):
                 bg_hex, bg_a_int = existing_pixel
-                applied_hex, applied_alpha = blend_colors(
+                applied_hex, applied_alpha = canvas_cython_helpers.blend_colors_cy(
                     source_hex, source_alpha, bg_hex, bg_a_int
                 )
 
@@ -474,32 +440,40 @@ class PixelCanvas(ttk.Frame):
                 applied_alpha if self.app.render_pixel_alpha_var.get() else 255
             )
             alpha_norm = alpha_to_use / 255.0
-            applied_rgb = hex_to_rgb(applied_hex)
+            applied_rgb = canvas_cython_helpers.hex_to_rgb_cy(applied_hex)
             composite_rgb = tuple(
-                applied_rgb[c] * alpha_norm + base_rgb[c] * (1.0 - alpha_norm)
+                int(applied_rgb[c] * alpha_norm + base_rgb[c] * (1.0 - alpha_norm))
                 for c in range(3)
             )
 
         final_rgb = composite_rgb
-        for i in range(active_layer_index + 1, len(self.app.layers)):
-            layer = self.app.layers[i]
-            if not layer.visible:
-                continue
-            pixel_above_data = layer.pixel_data.get((x, y))
+        visible_layers_data = [l.pixel_data for l in self.app.layers if l.visible]
+        render_alpha = self.app.render_pixel_alpha_var.get()
+
+        visible_layer_indices = [i for i, l in enumerate(self.app.layers) if l.visible]
+        try:
+            start_idx = visible_layer_indices.index(active_layer_index) + 1
+        except ValueError:
+            start_idx = len(visible_layer_indices)
+
+        for i in range(start_idx, len(visible_layer_indices)):
+            layer_data = visible_layers_data[i]
+            pixel_above_data = layer_data.get((x, y))
             if pixel_above_data and pixel_above_data[1] > 0:
                 hex_above, alpha_above = pixel_above_data
-                alpha_to_use = (
-                    alpha_above if self.app.render_pixel_alpha_var.get() else 255
-                )
+                alpha_to_use = alpha_above if render_alpha else 255
                 if alpha_to_use > 0:
                     alpha_norm = alpha_to_use / 255.0
-                    rgb_above = hex_to_rgb(hex_above)
+                    rgb_above = canvas_cython_helpers.hex_to_rgb_cy(hex_above)
                     final_rgb = tuple(
-                        rgb_above[c] * alpha_norm + final_rgb[c] * (1.0 - alpha_norm)
+                        int(
+                            rgb_above[c] * alpha_norm
+                            + final_rgb[c] * (1.0 - alpha_norm)
+                        )
                         for c in range(3)
                     )
 
-        final_rgb_int = tuple(min(255, max(0, int(round(c)))) for c in final_rgb)
+        final_rgb_int = tuple(min(255, max(0, c)) for c in final_rgb)
         return final_rgb_int + (255,)
 
     def _schedule_preview_render(self):
@@ -518,18 +492,30 @@ class PixelCanvas(ttk.Frame):
                 self._schedule_preview_render()
             return
 
-        tool_options = self.app._get_tool_options()
-        is_eraser = tool_options["tool"] == "eraser"
+        tool_opts = self.app._get_tool_options()
 
-        dirty_chunks = defaultdict(list)
-        for px, py in self.new_preview_pixels:
-            cx, cy = px // self.CHUNK_SIZE, py // self.CHUNK_SIZE
-            dirty_chunks[(cx, cy)].append((px, py))
+        tool_opts["color_blending"] = self.app.color_blending_var.get()
+
+        visible_layers_data = [
+            layer.pixel_data for layer in self.app.layers if layer.visible
+        ]
+        use_bg = self.app.show_canvas_background_var.get()
+        bg_rgb = canvas_cython_helpers.hex_to_rgb_cy(self.app.canvas_bg_color)
+        render_alpha = self.app.render_pixel_alpha_var.get()
+
+        rendered_buffers = canvas_cython_helpers.render_preview_chunks_cy(
+            self.new_preview_pixels,
+            tool_opts,
+            visible_layers_data,
+            use_bg,
+            bg_rgb,
+            render_alpha,
+            self.CHUNK_SIZE,
+        )
         self.new_preview_pixels.clear()
 
-        for (cx, cy), pixels_in_chunk in dirty_chunks.items():
+        for (cx, cy), buffer in rendered_buffers.items():
             if (cx, cy) not in self.preview_chunks:
-
                 canvas_x = cx * self.CHUNK_SIZE * self.app.pixel_size
                 canvas_y = cy * self.CHUNK_SIZE * self.app.pixel_size
                 new_chunk = {
@@ -540,19 +526,14 @@ class PixelCanvas(ttk.Frame):
                 self.preview_chunks[(cx, cy)] = new_chunk
 
             chunk = self.preview_chunks[(cx, cy)]
-            pil_image = chunk["pil"]
 
-            for px, py in pixels_in_chunk:
-                rgba = self._calculate_preview_pixel_rgba(
-                    px, py, is_eraser, tool_options
-                )
+            pil_image = Image.fromarray(buffer, "RGBA")
 
-                img_x, img_y = px % self.CHUNK_SIZE, py % self.CHUNK_SIZE
-                pil_image.putpixel((img_x, img_y), rgba)
+            chunk["pil"].paste(pil_image, mask=pil_image)
 
             final_w = self.CHUNK_SIZE * self.app.pixel_size
             if final_w > 0:
-                resized_img = pil_image.resize((final_w, final_w), Image.NEAREST)
+                resized_img = chunk["pil"].resize((final_w, final_w), Image.NEAREST)
                 chunk["photo"] = ImageTk.PhotoImage(resized_img)
                 self.canvas.itemconfig(chunk["item"], image=chunk["photo"])
 
@@ -571,11 +552,11 @@ class PixelCanvas(ttk.Frame):
         self.new_preview_pixels.clear()
 
     def flood_fill(self, start_x, start_y, tool_options):
-
         active_layer_data = tool_options["active_layer_data"]
         new_color_hex, new_alpha = tool_options["color"], tool_options["alpha"]
         if start_x is None:
             return
+
         target_data = active_layer_data.get((start_x, start_y), ("transparent", 0))
         if target_data == (new_color_hex, new_alpha) and not (
             self.app.color_blending_var.get() and 0 < new_alpha < 255
@@ -583,7 +564,12 @@ class PixelCanvas(ttk.Frame):
             return
         if target_data == ("transparent", 0) and new_alpha == 0:
             return
-        stack, processed, pixels_before = [(start_x, start_y)], set(), {}
+
+        pixels_before = {}
+        pixels_after = {}
+        processed = set()
+        stack = [(start_x, start_y)]
+
         while stack:
             x, y = stack.pop()
             if (
@@ -591,6 +577,7 @@ class PixelCanvas(ttk.Frame):
                 or (x, y) in processed
             ):
                 continue
+
             current_pixel_data = active_layer_data.get((x, y), ("transparent", 0))
             if current_pixel_data == target_data:
                 pixels_before[(x, y)] = current_pixel_data
@@ -598,6 +585,7 @@ class PixelCanvas(ttk.Frame):
                 self.draw_pixel(x, y, new_color_hex, new_alpha, active_layer_data)
                 for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
                     stack.append((x + dx, y + dy))
+
         if processed:
             pixels_after = {(x, y): active_layer_data.get((x, y)) for x, y in processed}
             action = PixelAction(
@@ -606,42 +594,12 @@ class PixelCanvas(ttk.Frame):
             self.app.add_action(action)
             self.rescale_canvas()
 
-    def start_draw(self, event, tool_options):
-        px, py = self.get_pixel_coords(event.x, event.y)
-        if px is None or not tool_options["active_layer"]:
-            return
-        if self.app.eyedropper_mode:
-            self.app.pick_color_from_canvas_tool(px, py)
-            return
-        if not tool_options["active_layer"].visible:
-            self.app.show_hidden_layer_warning()
-            return
-
-        self._cleanup_preview()
-        self.drawing = True
-        self.stroke_pixels_drawn_this_stroke.clear()
-
-        tool = tool_options["tool"]
-        if tool == "shape":
-            self.start_shape_point = (px, py)
-        elif tool == "fill":
-            self.flood_fill(px, py, tool_options)
-        else:
-            self.last_draw_pixel_x, self.last_draw_pixel_y = px, py
-
-            initial_pixels = set(
-                self._get_brush_pixels(px, py, tool_options["brush_size"])
-            )
-            self.stroke_pixels_drawn_this_stroke.update(initial_pixels)
-            self.new_preview_pixels.update(initial_pixels)
-
-            self._schedule_preview_render()
-
     def draw(self, event, tool_options):
         if not self.drawing or self.app.eyedropper_mode:
             return
         curr_px, curr_py = self.get_pixel_coords(event.x, event.y)
         tool = tool_options["tool"]
+
         if tool == "shape":
 
             if curr_px is None or self.start_shape_point is None:
@@ -700,8 +658,8 @@ class PixelCanvas(ttk.Frame):
                 )
             if self.preview_shape_item:
                 self.canvas.tag_raise(self.preview_shape_item)
-        elif tool != "fill":
 
+        elif tool != "fill":
             if curr_px is None:
                 self.last_draw_pixel_x = self.last_draw_pixel_y = None
                 return
@@ -709,26 +667,27 @@ class PixelCanvas(ttk.Frame):
                 return
 
             pixels_to_add = set()
-            if self.last_draw_pixel_x is not None:
-                for p_x, p_y in bresenham_line(
-                    self.last_draw_pixel_x, self.last_draw_pixel_y, curr_px, curr_py
-                ):
-                    for brush_px, brush_py in self._get_brush_pixels(
-                        p_x, p_y, tool_options["brush_size"]
-                    ):
-                        if (
-                            brush_px,
-                            brush_py,
-                        ) not in self.stroke_pixels_drawn_this_stroke:
-                            self.stroke_pixels_drawn_this_stroke.add(
-                                (brush_px, brush_py)
-                            )
-                            pixels_to_add.add((brush_px, brush_py))
 
-            self.new_preview_pixels.update(pixels_to_add)
+            if self.last_draw_pixel_x is not None:
+
+                pixels_to_add = canvas_cython_helpers.get_stroke_pixels_cy(
+                    self.last_draw_pixel_x,
+                    self.last_draw_pixel_y,
+                    curr_px,
+                    curr_py,
+                    tool_options["brush_size"],
+                    self.app.canvas_width,
+                    self.app.canvas_height,
+                    self.stroke_pixels_drawn_this_stroke,
+                )
+
+                if pixels_to_add:
+                    self.new_preview_pixels.update(pixels_to_add)
+
             self.last_draw_pixel_x, self.last_draw_pixel_y = curr_px, curr_py
 
     def stop_draw(self, event, tool_options):
+
         if not self.drawing or not tool_options["active_layer"]:
             return
 
@@ -742,7 +701,6 @@ class PixelCanvas(ttk.Frame):
         )
         pixels_to_process, pixels_before = set(), {}
         if tool == "shape":
-
             if self.preview_shape_item:
                 self.canvas.delete(self.preview_shape_item)
                 self.preview_shape_item = None
@@ -756,7 +714,11 @@ class PixelCanvas(ttk.Frame):
                 tool_options["lock_aspect"],
             )
             if shape_type == "Line":
-                pixels_to_process.update(bresenham_line(x0, y0, end_px, end_py))
+
+                pixels_to_process.update(
+                    canvas_cython_helpers.bresenham_line_cy(x0, y0, end_px, end_py)
+                )
+
             elif shape_type == "Rectangle":
                 ex, ey = end_px, end_py
                 if lock_aspect:
@@ -833,7 +795,7 @@ class PixelCanvas(ttk.Frame):
                                             inner_ellipse.add((px, py))
                         pixels_to_process.update(full_ellipse - inner_ellipse)
                     else:
-                        for px, py in bresenham_line(
+                        for px, py in canvas_cython_helpers.bresenham_line_cy(
                             x0 - rx, y0 - ry, x0 + rx, y0 + ry
                         ):
                             if (
@@ -878,8 +840,38 @@ class PixelCanvas(ttk.Frame):
             self.app.add_action(action)
             self.rescale_canvas()
 
-    def _core_pick_color_at_pixel(self, px, py):
+    def start_draw(self, event, tool_options):
+        px, py = self.get_pixel_coords(event.x, event.y)
+        if px is None or not tool_options["active_layer"]:
+            return
+        if self.app.eyedropper_mode:
+            self.app.pick_color_from_canvas_tool(px, py)
+            return
+        if not tool_options["active_layer"].visible:
+            self.app.show_hidden_layer_warning()
+            return
 
+        self._cleanup_preview()
+        self.drawing = True
+        self.stroke_pixels_drawn_this_stroke.clear()
+
+        tool = tool_options["tool"]
+        if tool == "shape":
+            self.start_shape_point = (px, py)
+        elif tool == "fill":
+            self.flood_fill(px, py, tool_options)
+        else:
+            self.last_draw_pixel_x, self.last_draw_pixel_y = px, py
+
+            initial_pixels = set(
+                self._get_brush_pixels(px, py, tool_options["brush_size"])
+            )
+            self.stroke_pixels_drawn_this_stroke.update(initial_pixels)
+            self.new_preview_pixels.update(initial_pixels)
+
+            self._schedule_preview_render()
+
+    def _core_pick_color_at_pixel(self, px, py):
         if px is None:
             return False
         for layer in reversed(self.app.layers):
@@ -892,7 +884,6 @@ class PixelCanvas(ttk.Frame):
         return False
 
     def start_mmb_eyedropper(self, event):
-
         px, py = self.get_pixel_coords(event.x, event.y)
         if px is None:
             return
@@ -902,18 +893,15 @@ class PixelCanvas(ttk.Frame):
         self._core_pick_color_at_pixel(px, py)
 
     def mmb_eyedropper_motion(self, event):
-
         if self.mmb_eyedropper_active:
             self._core_pick_color_at_pixel(*self.get_pixel_coords(event.x, event.y))
 
     def stop_mmb_eyedropper(self, event):
-
         if self.mmb_eyedropper_active:
             self.mmb_eyedropper_active = False
             self.canvas.configure(cursor=self.original_cursor_before_mmb)
 
     def start_pan(self, event):
-
         self.panning = True
         self.original_cursor_before_pan = self.canvas.cget("cursor")
         self.canvas.config(cursor="fleur")
@@ -924,6 +912,5 @@ class PixelCanvas(ttk.Frame):
         self._update_visible_canvas_image()
 
     def stop_pan(self, event):
-
         self.panning = False
         self.canvas.config(cursor=self.original_cursor_before_pan)
