@@ -7,6 +7,7 @@ import math
 import colorsys
 import re
 import copy
+import numpy
 
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from color_wheel_picker import ColorWheelPicker
@@ -61,6 +62,9 @@ class PixelArtApp:
         self.current_filename = None
         self.layers, self.active_layer_index = [], -1
         self.undo_stack, self.redo_stack = [], []
+
+        self.last_known_width = 0
+        self.last_known_height = 0
 
         self.show_canvas_background_var, self.save_background_var = tk.BooleanVar(
             value=False
@@ -280,8 +284,15 @@ class PixelArtApp:
         dialog.bind("<Escape>", lambda e: dialog.destroy())
 
     def on_window_resize(self, event):
+
         if event.widget == self.root and hasattr(self, "pixel_canvas"):
-            self.pixel_canvas.schedule_rescale()
+            if (
+                self.last_known_width != event.width
+                or self.last_known_height != event.height
+            ):
+                self.last_known_width = event.width
+                self.last_known_height = event.height
+                self.pixel_canvas.schedule_rescale()
 
     def _update_canvas_workarea_color(self):
         if not hasattr(self, "pixel_canvas"):
@@ -868,17 +879,14 @@ class PixelArtApp:
                 img = img.convert("RGBA")
                 old_w, old_h = self.canvas_width, self.canvas_height
                 self.canvas_width, self.canvas_height = img.width, img.height
+
                 self._initialize_layers()
                 self.layers[0].name = os.path.basename(filename)
-                self.layers[0].pixel_data.clear()
-                for y in range(img.height):
-                    for x in range(img.width):
-                        r, g, b, a = img.getpixel((x, y))
-                        if a > 0:
-                            self.layers[0].pixel_data[(x, y)] = (
-                                rgb_to_hex(r, g, b),
-                                a,
-                            )
+
+                rgba_data = numpy.array(img)
+                self.layers[0].pixel_data = canvas_cython_helpers.process_image_data_cy(
+                    rgba_data
+                )
                 self._clear_history()
                 self.create_canvas()
                 self._update_layers_ui()
