@@ -11,13 +11,14 @@ source_file = os.path.join(script_dir, "canvas_cython_helpers.pyx")
 if __name__ == "__main__":
     if len(sys.argv) == 1:
         print("No command provided, defaulting to 'build_ext --inplace'")
-        sys.argv.extend(['build_ext', '--inplace'])
+        sys.argv.extend(["build_ext", "--inplace"])
 
     setup(
         ext_modules=cythonize(
             Extension(
                 "canvas_cython_helpers",
                 sources=[source_file],
+                language="c++",
                 include_dirs=[numpy.get_include()],
             )
         ),
