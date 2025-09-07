@@ -3,10 +3,15 @@
 # cython: boundscheck=False
 # cython: wraparound=False
 # cython: cdivision=True
+# cython: cpp=True
 
 import numpy as np
 cimport numpy as np
 from collections import defaultdict
+
+from libc.stdio cimport sprintf
+from libc.stdlib cimport calloc, free
+from libcpp.vector cimport vector
 
 cdef inline unsigned char blend_channel(unsigned char fg, unsigned char bg, double alpha):
     return <unsigned char>(fg * alpha + bg * (1.0 - alpha))
@@ -200,6 +205,8 @@ cpdef dict render_preview_chunks_cy(
     bint use_bg_color, tuple bg_color_rgb, bint render_alpha,
     int chunk_size
 ):
+    cdef int num_pixels = len(new_preview_pixels)
+
     cdef bint is_eraser = tool_options.get("tool") == "eraser"
     cdef int active_layer_index = tool_options["active_layer_index"]
     cdef str source_hex = tool_options.get("color")
@@ -281,3 +288,122 @@ cpdef dict render_preview_chunks_cy(
             v_buffer[img_y, img_x, 3] = 255
 
     return rendered_chunk_buffers
+
+cdef cppclass PixelCoord:
+    int x, y
+
+cpdef tuple flood_fill_apply_cy(
+    int start_x, int start_y,
+    int canvas_width, int canvas_height,
+    dict active_layer_data,
+    tuple target_data,
+    str new_hex, int new_alpha,
+    bint color_blending
+):
+    cdef dict pixels_before = {}
+    cdef dict pixels_after = {}
+    cdef size_t map_size = canvas_width * canvas_height
+    cdef char* processed = <char*>calloc(map_size, sizeof(char))
+    cdef vector[PixelCoord] stack
+    cdef vector[PixelCoord] pixels_to_fill
+    cdef int x, y, nx, ny, px, py
+    cdef long i
+    cdef tuple current_pixel_data, original_pixel, final_pixel_data
+    cdef PixelCoord current_coord, temp_coord
+    cdef str applied_hex
+    cdef int applied_alpha
+
+    if not (0 <= start_x < canvas_width and 0 <= start_y < canvas_height):
+        if processed: free(processed)
+        return ({}, {})
+
+    if processed is NULL:
+        raise MemoryError("Failed to allocate processed map for flood fill")
+
+    temp_coord.x = start_x
+    temp_coord.y = start_y
+    stack.push_back(temp_coord)
+    processed[start_y * canvas_width + start_x] = 1
+
+    while not stack.empty():
+        current_coord = stack.back()
+        stack.pop_back()
+        x = current_coord.x
+        y = current_coord.y
+        
+        current_pixel_data = active_layer_data.get((x, y), ("transparent", 0))
+
+        if current_pixel_data == target_data:
+            temp_coord.x = x
+            temp_coord.y = y
+            pixels_to_fill.push_back(temp_coord)
+            pixels_before[(x,y)] = current_pixel_data
+
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                nx = x + dx
+                ny = y + dy
+                if 0 <= nx < canvas_width and 0 <= ny < canvas_height and not processed[ny * canvas_width + nx]:
+                    processed[ny * canvas_width + nx] = 1
+                    temp_coord.x = nx
+                    temp_coord.y = ny
+                    stack.push_back(temp_coord)
+    
+    free(processed)
+    
+    if not pixels_to_fill.empty():
+        for i in range(pixels_to_fill.size()):
+            px = pixels_to_fill[i].x
+            py = pixels_to_fill[i].y
+            
+            applied_hex = new_hex
+            applied_alpha = new_alpha
+
+            if color_blending and 0 < new_alpha < 255:
+                original_pixel = pixels_before.get((px, py))
+                if original_pixel and original_pixel[1] > 0:
+                    applied_hex, applied_alpha = blend_colors_cy(new_hex, new_alpha, original_pixel[0], original_pixel[1])
+
+            if applied_alpha > 0:
+                final_pixel_data = (applied_hex, applied_alpha)
+                active_layer_data[(px, py)] = final_pixel_data
+                pixels_after[(px, py)] = final_pixel_data
+            elif (px, py) in active_layer_data:
+                del active_layer_data[(px, py)]
+                pixels_after[(px, py)] = None
+    
+    return (pixels_before, pixels_after)
+
+def process_image_data_cy(np.ndarray[np.uint8_t, ndim=3] rgba_data):
+    cdef int height = rgba_data.shape[0]
+    cdef int width = rgba_data.shape[1]
+    cdef dict pixel_data = {}
+
+    cdef dict color_cache = {}
+    cdef str hex_str
+
+    cdef int x, y, r, g, b, a
+    cdef unsigned int rgb_int
+    cdef char hex_buffer[8]
+    hex_buffer[0] = b'#'
+    hex_buffer[7] = 0
+
+    for y in range(height):
+        for x in range(width):
+            a = rgba_data[y, x, 3]
+            if a > 0:
+                r = rgba_data[y, x, 0]
+                g = rgba_data[y, x, 1]
+                b = rgba_data[y, x, 2]
+
+                rgb_int = (r << 16) | (g << 8) | b
+
+                hex_str = color_cache.get(rgb_int)
+
+                if hex_str is None:
+                    sprintf(hex_buffer + 1, b"%02x%02x%02x", r, g, b)
+                    hex_str = hex_buffer.decode('ascii')
+                    color_cache[rgb_int] = hex_str
+
+                pixel_data[(x, y)] = (hex_str, a)
+
+    return pixel_data
