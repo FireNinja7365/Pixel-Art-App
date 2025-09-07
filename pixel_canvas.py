@@ -3,6 +3,7 @@ from tkinter import ttk
 from PIL import Image, ImageTk, ImageDraw
 import math
 from collections import defaultdict
+import functools
 
 from actions import PixelAction
 
@@ -488,8 +489,6 @@ class PixelCanvas(ttk.Frame):
             return
 
         if not self.new_preview_pixels:
-            if self.drawing:
-                self._schedule_preview_render()
             return
 
         tool_opts = self.app._get_tool_options()
@@ -558,41 +557,37 @@ class PixelCanvas(ttk.Frame):
             return
 
         target_data = active_layer_data.get((start_x, start_y), ("transparent", 0))
-        if target_data == (new_color_hex, new_alpha) and not (
-            self.app.color_blending_var.get() and 0 < new_alpha < 255
-        ):
+        new_pixel_data = (new_color_hex, new_alpha)
+
+        is_blending = self.app.color_blending_var.get()
+        if target_data == new_pixel_data and not (is_blending and 0 < new_alpha < 255):
             return
+
         if target_data == ("transparent", 0) and new_alpha == 0:
             return
 
-        pixels_before = {}
-        pixels_after = {}
-        processed = set()
-        stack = [(start_x, start_y)]
+        pixels_before, pixels_after = canvas_cython_helpers.flood_fill_apply_cy(
+            start_x,
+            start_y,
+            self.app.canvas_width,
+            self.app.canvas_height,
+            active_layer_data,
+            target_data,
+            new_color_hex,
+            new_alpha,
+            is_blending,
+        )
 
-        while stack:
-            x, y = stack.pop()
-            if (
-                not (0 <= x < self.app.canvas_width and 0 <= y < self.app.canvas_height)
-                or (x, y) in processed
-            ):
-                continue
+        if not pixels_before:
+            return
 
-            current_pixel_data = active_layer_data.get((x, y), ("transparent", 0))
-            if current_pixel_data == target_data:
-                pixels_before[(x, y)] = current_pixel_data
-                processed.add((x, y))
-                self.draw_pixel(x, y, new_color_hex, new_alpha, active_layer_data)
-                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-                    stack.append((x + dx, y + dy))
+        self._dirty_bbox = (0, 0, self.app.canvas_width, self.app.canvas_height)
 
-        if processed:
-            pixels_after = {(x, y): active_layer_data.get((x, y)) for x, y in processed}
-            action = PixelAction(
-                tool_options["active_layer_index"], pixels_before, pixels_after
-            )
-            self.app.add_action(action)
-            self.rescale_canvas()
+        action = PixelAction(
+            tool_options["active_layer_index"], pixels_before, pixels_after
+        )
+        self.app.add_action(action)
+        self.rescale_canvas()
 
     def draw(self, event, tool_options):
         if not self.drawing or self.app.eyedropper_mode:
@@ -683,6 +678,8 @@ class PixelCanvas(ttk.Frame):
 
                 if pixels_to_add:
                     self.new_preview_pixels.update(pixels_to_add)
+
+                    self._schedule_preview_render()
 
             self.last_draw_pixel_x, self.last_draw_pixel_y = curr_px, curr_py
 
