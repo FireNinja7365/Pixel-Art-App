@@ -205,8 +205,6 @@ cpdef dict render_preview_chunks_cy(
     bint use_bg_color, tuple bg_color_rgb, bint render_alpha,
     int chunk_size
 ):
-    cdef int num_pixels = len(new_preview_pixels)
-
     cdef bint is_eraser = tool_options.get("tool") == "eraser"
     cdef int active_layer_index = tool_options["active_layer_index"]
     cdef str source_hex = tool_options.get("color")
@@ -215,26 +213,19 @@ cpdef dict render_preview_chunks_cy(
     cdef bint color_blending = tool_options.get("color_blending", False)
 
     cdef dict dirty_chunks = {}
-    cdef list pixel_list_for_chunk
-
-    cdef int px, py, cx, cy
-    cdef int i, a
-    cdef tuple existing_pixel
+    cdef int px, py, cx, cy, i, a, alpha_to_use
+    cdef tuple existing_pixel, base_rgb, applied_rgb, rgb_above, chunk_coord
     cdef str applied_hex
-    cdef int applied_alpha, alpha_to_use
-    cdef double alpha_norm
-    cdef tuple base_rgb, applied_rgb, rgb_above
-    cdef double composite_r, composite_g, composite_b
-    cdef double final_r, final_g, final_b
+    cdef int applied_alpha
+    cdef double alpha_norm, composite_r, composite_g, composite_b, final_r, final_g, final_b
+    cdef list pixel_list_for_chunk
     
     cdef dict rendered_chunk_buffers = {}
     cdef np.ndarray[np.uint8_t, ndim=3] buffer
     cdef unsigned char[:, :, ::1] v_buffer
 
     for px, py in new_preview_pixels:
-        cx = px // chunk_size
-        cy = py // chunk_size
-        chunk_coord = (cx, cy)
+        chunk_coord = (px // chunk_size, py // chunk_size)
         if chunk_coord not in dirty_chunks:
             dirty_chunks[chunk_coord] = []
         dirty_chunks[chunk_coord].append((px, py))
@@ -252,8 +243,7 @@ cpdef dict render_preview_chunks_cy(
 
             applied_hex = source_hex
             applied_alpha = source_alpha
-            if is_eraser:
-                applied_alpha = 0
+            if is_eraser: applied_alpha = 0
             
             existing_pixel = active_layer_data.get((px, py))
             if color_blending and 0 < source_alpha < 255 and existing_pixel and existing_pixel[1] > 0:
@@ -373,37 +363,113 @@ cpdef tuple flood_fill_apply_cy(
     
     return (pixels_before, pixels_after)
 
-def process_image_data_cy(np.ndarray[np.uint8_t, ndim=3] rgba_data):
-    cdef int height = rgba_data.shape[0]
-    cdef int width = rgba_data.shape[1]
-    cdef dict pixel_data = {}
+cpdef set get_brush_pixels_cy(int center_x, int center_y, int brush_size, int canvas_width, int canvas_height):
+    cdef set pixels = set()
+    cdef int offset = (brush_size - 1) // 2
+    cdef int start_x = center_x - offset
+    cdef int start_y = center_y - offset
+    cdef int x_off, y_off, px, py
+    for y_off in range(brush_size):
+        py = start_y + y_off
+        if 0 <= py < canvas_height:
+            for x_off in range(brush_size):
+                px = start_x + x_off
+                if 0 <= px < canvas_width:
+                    pixels.add((px, py))
+    return pixels
 
-    cdef dict color_cache = {}
-    cdef str hex_str
+cpdef set get_rectangle_pixels_cy(int x0, int y0, int x1, int y1, bint fill, int canvas_width, int canvas_height):
+    cdef set pixels = set()
+    cdef int xs = min(x0, x1), ys = min(y0, y1)
+    cdef int xe = max(x0, x1), ye = max(y0, y1)
+    cdef int x, y
+    if fill:
+        for y in range(ys, ye + 1):
+            if 0 <= y < canvas_height:
+                for x in range(xs, xe + 1):
+                    if 0 <= x < canvas_width:
+                        pixels.add((x, y))
+    else:
+        for x in range(xs, xe + 1):
+            if 0 <= x < canvas_width:
+                if 0 <= ys < canvas_height: pixels.add((x, ys))
+                if 0 <= ye < canvas_height: pixels.add((x, ye))
+        for y in range(ys + 1, ye):
+            if 0 <= y < canvas_height:
+                if 0 <= xs < canvas_width: pixels.add((xs, y))
+                if 0 <= xe < canvas_width: pixels.add((xe, y))
+    return pixels
 
-    cdef int x, y, r, g, b, a
-    cdef unsigned int rgb_int
-    cdef char hex_buffer[8]
-    hex_buffer[0] = b'#'
-    hex_buffer[7] = 0
+cpdef set get_ellipse_pixels_cy(int x0, int y0, int rx, int ry, bint fill, int canvas_width, int canvas_height):
+    cdef set pixels = set()
+    cdef int px, py, x_offset, y_offset
+    cdef set full_ellipse, inner_ellipse
+    cdef int rx_inner, ry_inner
 
-    for y in range(height):
-        for x in range(width):
-            a = rgba_data[y, x, 3]
-            if a > 0:
-                r = rgba_data[y, x, 0]
-                g = rgba_data[y, x, 1]
-                b = rgba_data[y, x, 2]
+    if rx == 0 and ry == 0:
+        if 0 <= x0 < canvas_width and 0 <= y0 < canvas_height: pixels.add((x0,y0))
+        return pixels
 
-                rgb_int = (r << 16) | (g << 8) | b
+    if fill:
+        for y_offset in range(-ry, ry + 1):
+            for x_offset in range(-rx, rx + 1):
+                if ((x_offset / <float>rx if rx > 0 else 0)**2 + (y_offset / <float>ry if ry > 0 else 0)**2) <= 1:
+                    px = x0 + x_offset; py = y0 + y_offset
+                    if 0 <= px < canvas_width and 0 <= py < canvas_height: pixels.add((px, py))
+    else:
+        full_ellipse = set()
+        inner_ellipse = set()
+        for y_offset in range(-ry, ry + 1):
+            for x_offset in range(-rx, rx + 1):
+                if ((x_offset / <float>rx if rx > 0 else 0)**2 + (y_offset / <float>ry if ry > 0 else 0)**2) <= 1:
+                    px = x0 + x_offset; py = y0 + y_offset
+                    if 0 <= px < canvas_width and 0 <= py < canvas_height: full_ellipse.add((px, py))
+        
+        rx_inner = max(0, rx - 1)
+        ry_inner = max(0, ry - 1)
+        if rx_inner > 0 or ry_inner > 0:
+            for y_offset in range(-ry_inner, ry_inner + 1):
+                for x_offset in range(-rx_inner, rx_inner + 1):
+                    if ((x_offset / <float>rx_inner if rx_inner > 0 else 0)**2 + (y_offset / <float>ry_inner if ry_inner > 0 else 0)**2) <= 1:
+                        px = x0 + x_offset; py = y0 + y_offset
+                        if 0 <= px < canvas_width and 0 <= py < canvas_height: inner_ellipse.add((px, py))
+        pixels.update(full_ellipse - inner_ellipse)
+    return pixels
 
-                hex_str = color_cache.get(rgb_int)
+cpdef tuple apply_pixels_cy(set pixels_to_process, dict active_layer_data, str color, int alpha, bint color_blending):
+    cdef dict pixels_before = {}
+    cdef dict pixels_after = {}
+    cdef tuple original_pixel, new_pixel_data
+    cdef str applied_hex
+    cdef int applied_alpha
+    cdef int px, py
+    
+    for px, py in pixels_to_process:
+        original_pixel = active_layer_data.get((px, py))
+        pixels_before[(px, py)] = original_pixel
+        
+        applied_hex = color
+        applied_alpha = alpha
 
-                if hex_str is None:
-                    sprintf(hex_buffer + 1, b"%02x%02x%02x", r, g, b)
-                    hex_str = hex_buffer.decode('ascii')
-                    color_cache[rgb_int] = hex_str
+        if color_blending and 0 < alpha < 255 and original_pixel and original_pixel[1] > 0:
+            applied_hex, applied_alpha = blend_colors_cy(color, alpha, original_pixel[0], original_pixel[1])
+        
+        new_pixel_data = (applied_hex, applied_alpha) if applied_alpha > 0 else None
+        
+        if original_pixel != new_pixel_data:
+            if new_pixel_data:
+                active_layer_data[(px, py)] = new_pixel_data
+            elif (px, py) in active_layer_data:
+                del active_layer_data[(px, py)]
+        pixels_after[(px, py)] = active_layer_data.get((px,py))
 
-                pixel_data[(x, y)] = (hex_str, a)
+    return (pixels_before, pixels_after)
 
-    return pixel_data
+cpdef tuple pick_color_at_pixel_cy(int px, int py, list visible_layers_data):
+    cdef tuple pixel_data
+    cdef int i
+    for i in range(len(visible_layers_data) - 1, -1, -1):
+        pixel_data = visible_layers_data[i].get((px, py))
+        if pixel_data and pixel_data[1] > 0:
+            return pixel_data
+    return None
