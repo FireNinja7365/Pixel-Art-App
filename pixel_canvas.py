@@ -360,123 +360,6 @@ class PixelCanvas(ttk.Frame):
             else (None, None)
         )
 
-    def draw_pixel(self, x, y, source_hex, source_alpha, active_layer_data):
-        if x is None or y is None:
-            return
-        original_pixel = active_layer_data.get((x, y))
-        applied_hex, applied_alpha = source_hex, source_alpha
-        if (
-            self.app.color_blending_var.get()
-            and 0 < source_alpha < 255
-            and original_pixel
-            and original_pixel[1] > 0
-        ):
-            bg_hex, bg_a_int = original_pixel
-
-            applied_hex, applied_alpha = canvas_cython_helpers.blend_colors_cy(
-                source_hex, source_alpha, bg_hex, bg_a_int
-            )
-
-        new_pixel_data = (applied_hex, applied_alpha) if applied_alpha > 0 else None
-        if original_pixel != new_pixel_data:
-            if new_pixel_data:
-                active_layer_data[(x, y)] = new_pixel_data
-            elif (x, y) in active_layer_data:
-                del active_layer_data[(x, y)]
-            self._update_dirty_bbox(x, y)
-
-    def _get_brush_pixels(self, center_x, center_y, brush_size):
-        offset = (brush_size - 1) // 2
-        start_x, start_y = center_x - offset, center_y - offset
-        for y_off in range(brush_size):
-            py = start_y + y_off
-            if 0 <= py < self.app.canvas_height:
-                for x_off in range(brush_size):
-                    px = start_x + x_off
-                    if 0 <= px < self.app.canvas_width:
-                        yield (px, py)
-
-    def _get_composite_pixel_color_under_layer(self, x, y, layer_index):
-
-        all_layers_data = [l.pixel_data for l in self.app.layers if l.visible]
-        use_bg = self.app.show_canvas_background_var.get()
-        bg_rgb = canvas_cython_helpers.hex_to_rgb_cy(self.app.canvas_bg_color)
-        render_alpha = self.app.render_pixel_alpha_var.get()
-
-        visible_layer_map = [i for i, l in enumerate(self.app.layers) if l.visible]
-        if layer_index not in visible_layer_map:
-
-            return self._get_composite_pixel_color_under_layer_py(x, y, layer_index)
-
-        cython_layer_index = visible_layer_map.index(layer_index)
-
-        return canvas_cython_helpers.composite_pixel_stack_cy(
-            x, y, all_layers_data, cython_layer_index, use_bg, bg_rgb, render_alpha
-        )
-
-    def _calculate_preview_pixel_rgba(self, x, y, is_eraser, tool_options):
-        active_layer_index = tool_options["active_layer_index"]
-
-        base_rgb = self._get_composite_pixel_color_under_layer(x, y, active_layer_index)
-
-        applied_hex, applied_alpha = None, 0
-        if not is_eraser:
-            source_hex, source_alpha = tool_options["color"], tool_options["alpha"]
-            applied_hex, applied_alpha = source_hex, source_alpha
-            existing_pixel = tool_options["active_layer_data"].get((x, y))
-            if (
-                self.app.color_blending_var.get()
-                and 0 < source_alpha < 255
-                and existing_pixel
-                and existing_pixel[1] > 0
-            ):
-                bg_hex, bg_a_int = existing_pixel
-                applied_hex, applied_alpha = canvas_cython_helpers.blend_colors_cy(
-                    source_hex, source_alpha, bg_hex, bg_a_int
-                )
-
-        composite_rgb = base_rgb
-        if applied_alpha > 0:
-            alpha_to_use = (
-                applied_alpha if self.app.render_pixel_alpha_var.get() else 255
-            )
-            alpha_norm = alpha_to_use / 255.0
-            applied_rgb = canvas_cython_helpers.hex_to_rgb_cy(applied_hex)
-            composite_rgb = tuple(
-                int(applied_rgb[c] * alpha_norm + base_rgb[c] * (1.0 - alpha_norm))
-                for c in range(3)
-            )
-
-        final_rgb = composite_rgb
-        visible_layers_data = [l.pixel_data for l in self.app.layers if l.visible]
-        render_alpha = self.app.render_pixel_alpha_var.get()
-
-        visible_layer_indices = [i for i, l in enumerate(self.app.layers) if l.visible]
-        try:
-            start_idx = visible_layer_indices.index(active_layer_index) + 1
-        except ValueError:
-            start_idx = len(visible_layer_indices)
-
-        for i in range(start_idx, len(visible_layer_indices)):
-            layer_data = visible_layers_data[i]
-            pixel_above_data = layer_data.get((x, y))
-            if pixel_above_data and pixel_above_data[1] > 0:
-                hex_above, alpha_above = pixel_above_data
-                alpha_to_use = alpha_above if render_alpha else 255
-                if alpha_to_use > 0:
-                    alpha_norm = alpha_to_use / 255.0
-                    rgb_above = canvas_cython_helpers.hex_to_rgb_cy(hex_above)
-                    final_rgb = tuple(
-                        int(
-                            rgb_above[c] * alpha_norm
-                            + final_rgb[c] * (1.0 - alpha_norm)
-                        )
-                        for c in range(3)
-                    )
-
-        final_rgb_int = tuple(min(255, max(0, c)) for c in final_rgb)
-        return final_rgb_int + (255,)
-
     def _schedule_preview_render(self):
         if self._after_id_preview_render is None:
             self._after_id_preview_render = self.app.root.after(
@@ -614,7 +497,7 @@ class PixelCanvas(ttk.Frame):
                     (curr_py + 0.5) * self.app.pixel_size,
                 )
                 self.preview_shape_item = self.canvas.create_line(
-                    x_s, y_s, x_c, y_c, fill=tool_options["color"], width=1, dash=(4, 2)
+                    x_s, y_s, x_c, y_c, fill=tool_options["color"], width=2
                 )
             elif shape_type == "Rectangle":
                 ex, ey = curr_px, curr_py
@@ -631,7 +514,7 @@ class PixelCanvas(ttk.Frame):
                     max(y0, ey) + 1
                 ) * self.app.pixel_size
                 self.preview_shape_item = self.canvas.create_rectangle(
-                    c_x0, c_y0, c_x1, c_y1, outline=tool_options["color"], dash=(4, 2)
+                    c_x0, c_y0, c_x1, c_y1, outline=tool_options["color"], width=2
                 )
             elif shape_type == "Ellipse":
                 cx, cy = (x0 + 0.5) * self.app.pixel_size, (
@@ -649,7 +532,7 @@ class PixelCanvas(ttk.Frame):
                     cx + rx_f,
                     cy + ry_f,
                     outline=tool_options["color"],
-                    dash=(4, 2),
+                    width=2,
                 )
             if self.preview_shape_item:
                 self.canvas.tag_raise(self.preview_shape_item)
@@ -684,7 +567,6 @@ class PixelCanvas(ttk.Frame):
             self.last_draw_pixel_x, self.last_draw_pixel_y = curr_px, curr_py
 
     def stop_draw(self, event, tool_options):
-
         if not self.drawing or not tool_options["active_layer"]:
             return
 
@@ -692,150 +574,90 @@ class PixelCanvas(ttk.Frame):
         self._render_preview_frame()
         self._cleanup_preview()
 
-        tool, active_layer_data = (
-            tool_options["tool"],
-            tool_options["active_layer_data"],
-        )
-        pixels_to_process, pixels_before = set(), {}
+        tool = tool_options["tool"]
+        active_layer_data = tool_options["active_layer_data"]
+        pixels_to_process = set()
+
         if tool == "shape":
             if self.preview_shape_item:
                 self.canvas.delete(self.preview_shape_item)
                 self.preview_shape_item = None
             end_px, end_py = self.get_pixel_coords(event.x, event.y)
-            if self.start_shape_point is None or end_px is None:
-                self.start_shape_point = None
-                return
-            x0, y0 = self.start_shape_point
-            shape_type, lock_aspect = (
-                tool_options["shape_type"],
-                tool_options["lock_aspect"],
-            )
-            if shape_type == "Line":
 
-                pixels_to_process.update(
-                    canvas_cython_helpers.bresenham_line_cy(x0, y0, end_px, end_py)
-                )
+            if self.start_shape_point and end_px is not None:
+                x0, y0 = self.start_shape_point
+                shape_type = tool_options["shape_type"]
+                lock_aspect = tool_options["lock_aspect"]
 
-            elif shape_type == "Rectangle":
-                ex, ey = end_px, end_py
-                if lock_aspect:
-                    side = max(abs(end_px - x0), abs(end_py - y0))
-                    ex, ey = x0 + side * (-1 if end_px < x0 else 1), y0 + side * (
-                        -1 if end_py < y0 else 1
+                if shape_type == "Line":
+                    pixels_to_process.update(
+                        canvas_cython_helpers.bresenham_line_cy(x0, y0, end_px, end_py)
                     )
-                xs, ys, xe, ye = min(x0, ex), min(y0, ey), max(x0, ex), max(y0, ey)
-                if tool_options["fill_shape"]:
-                    for y in range(ys, ye + 1):
-                        for x in range(xs, xe + 1):
-                            if (
-                                0 <= x < self.app.canvas_width
-                                and 0 <= y < self.app.canvas_height
-                            ):
-                                pixels_to_process.add((x, y))
-                else:
-                    for x in range(xs, xe + 1):
-                        if 0 <= x < self.app.canvas_width:
-                            if 0 <= ys < self.app.canvas_height:
-                                pixels_to_process.add((x, ys))
-                            if 0 <= ye < self.app.canvas_height:
-                                pixels_to_process.add((x, ye))
-                    for y in range(ys + 1, ye):
-                        if 0 <= y < self.app.canvas_height:
-                            if 0 <= xs < self.app.canvas_width:
-                                pixels_to_process.add((xs, y))
-                            if 0 <= xe < self.app.canvas_width:
-                                pixels_to_process.add((xe, y))
-            elif shape_type == "Ellipse":
-                rx_u, ry_u = abs(end_px - x0), abs(end_py - y0)
-                rx, ry = (
-                    (max(rx_u, ry_u), max(rx_u, ry_u)) if lock_aspect else (rx_u, ry_u)
-                )
-                if tool_options["fill_shape"]:
-                    if rx == 0 and ry == 0:
-                        pixels_to_process.add((x0, y0))
-                    else:
-                        for y_offset in range(-ry, ry + 1):
-                            for x_offset in range(-rx, rx + 1):
-                                if ((x_offset / rx) ** 2 if rx > 0 else 0) + (
-                                    (y_offset / ry) ** 2 if ry > 0 else 0
-                                ) <= 1:
-                                    px, py = x0 + x_offset, y0 + y_offset
-                                    if (
-                                        0 <= px < self.app.canvas_width
-                                        and 0 <= py < self.app.canvas_height
-                                    ):
-                                        pixels_to_process.add((px, py))
-                else:
-                    full_ellipse, inner_ellipse = set(), set()
-                    if rx > 0 and ry > 0:
-                        for y_offset in range(-ry, ry + 1):
-                            for x_offset in range(-rx, rx + 1):
-                                if (x_offset / rx) ** 2 + (y_offset / ry) ** 2 <= 1:
-                                    px, py = x0 + x_offset, y0 + y_offset
-                                    if (
-                                        0 <= px < self.app.canvas_width
-                                        and 0 <= py < self.app.canvas_height
-                                    ):
-                                        full_ellipse.add((px, py))
-                        rx_inner, ry_inner = max(0, rx - 1), max(0, ry - 1)
-                        if rx_inner > 0 and ry_inner > 0:
-                            for y_offset in range(-ry_inner, ry_inner + 1):
-                                for x_offset in range(-rx_inner, rx_inner + 1):
-                                    if (x_offset / rx_inner) ** 2 + (
-                                        y_offset / ry_inner
-                                    ) ** 2 <= 1:
-                                        px, py = x0 + x_offset, y0 + y_offset
-                                        if (
-                                            0 <= px < self.app.canvas_width
-                                            and 0 <= py < self.app.canvas_height
-                                        ):
-                                            inner_ellipse.add((px, py))
-                        pixels_to_process.update(full_ellipse - inner_ellipse)
-                    else:
-                        for px, py in canvas_cython_helpers.bresenham_line_cy(
-                            x0 - rx, y0 - ry, x0 + rx, y0 + ry
-                        ):
-                            if (
-                                0 <= px < self.app.canvas_width
-                                and 0 <= py < self.app.canvas_height
-                            ):
-                                pixels_to_process.add((px, py))
-            if pixels_to_process:
-                for px, py in pixels_to_process:
-                    pixels_before[(px, py)] = active_layer_data.get((px, py))
-            for px, py in pixels_to_process:
-                self.draw_pixel(
-                    px,
-                    py,
-                    tool_options["color"],
-                    tool_options["alpha"],
-                    active_layer_data,
-                )
+                elif shape_type == "Rectangle":
+                    ex, ey = end_px, end_py
+                    if lock_aspect:
+                        side = max(abs(end_px - x0), abs(end_py - y0))
+                        ex = x0 + side * (-1 if end_px < x0 else 1)
+                        ey = y0 + side * (-1 if end_py < y0 else 1)
+                    pixels_to_process.update(
+                        canvas_cython_helpers.get_rectangle_pixels_cy(
+                            x0,
+                            y0,
+                            ex,
+                            ey,
+                            tool_options["fill_shape"],
+                            self.app.canvas_width,
+                            self.app.canvas_height,
+                        )
+                    )
+                elif shape_type == "Ellipse":
+                    rx_u, ry_u = abs(end_px - x0), abs(end_py - y0)
+                    rx, ry = (
+                        (max(rx_u, ry_u), max(rx_u, ry_u))
+                        if lock_aspect
+                        else (rx_u, ry_u)
+                    )
+                    pixels_to_process.update(
+                        canvas_cython_helpers.get_ellipse_pixels_cy(
+                            x0,
+                            y0,
+                            rx,
+                            ry,
+                            tool_options["fill_shape"],
+                            self.app.canvas_width,
+                            self.app.canvas_height,
+                        )
+                    )
             self.start_shape_point = None
+
         elif tool in ["pencil", "eraser"]:
-            pixels_to_process = self.stroke_pixels_drawn_this_stroke.copy()
-            if pixels_to_process:
-                for px, py in pixels_to_process:
-                    pixels_before[(px, py)] = active_layer_data.get((px, py))
-                is_eraser = tool == "eraser"
-                color, alpha = (
-                    ("transparent", 0)
-                    if is_eraser
-                    else (tool_options["color"], tool_options["alpha"])
-                )
-                for px, py in pixels_to_process:
-                    self.draw_pixel(px, py, color, alpha, active_layer_data)
+            pixels_to_process = self.stroke_pixels_drawn_this_stroke
             self.last_draw_pixel_x = self.last_draw_pixel_y = None
+
         if pixels_to_process:
-            pixels_after = {
-                (px, py): active_layer_data.get((px, py))
-                for px, py in pixels_to_process
-            }
-            action = PixelAction(
-                tool_options["active_layer_index"], pixels_before, pixels_after
+            is_eraser = tool == "eraser"
+            color, alpha = (
+                ("transparent", 0)
+                if is_eraser
+                else (tool_options["color"], tool_options["alpha"])
             )
-            self.app.add_action(action)
-            self.rescale_canvas()
+
+            pixels_before, pixels_after = canvas_cython_helpers.apply_pixels_cy(
+                pixels_to_process,
+                active_layer_data,
+                color,
+                alpha,
+                self.app.color_blending_var.get(),
+            )
+
+            if pixels_before:
+                for px, py in pixels_to_process:
+                    self._update_dirty_bbox(px, py)
+                action = PixelAction(
+                    tool_options["active_layer_index"], pixels_before, pixels_after
+                )
+                self.app.add_action(action)
+                self.rescale_canvas()
 
     def start_draw(self, event, tool_options):
         px, py = self.get_pixel_coords(event.x, event.y)
@@ -860,8 +682,12 @@ class PixelCanvas(ttk.Frame):
         else:
             self.last_draw_pixel_x, self.last_draw_pixel_y = px, py
 
-            initial_pixels = set(
-                self._get_brush_pixels(px, py, tool_options["brush_size"])
+            initial_pixels = canvas_cython_helpers.get_brush_pixels_cy(
+                px,
+                py,
+                tool_options["brush_size"],
+                self.app.canvas_width,
+                self.app.canvas_height,
             )
             self.stroke_pixels_drawn_this_stroke.update(initial_pixels)
             self.new_preview_pixels.update(initial_pixels)
@@ -871,13 +697,15 @@ class PixelCanvas(ttk.Frame):
     def _core_pick_color_at_pixel(self, px, py):
         if px is None:
             return False
-        for layer in reversed(self.app.layers):
-            if not layer.visible:
-                continue
-            pixel_data = layer.pixel_data.get((px, py))
-            if pixel_data and pixel_data[1] > 0:
-                self.pick_color_callback(pixel_data[0], pixel_data[1])
-                return True
+        visible_layers = [
+            layer.pixel_data for layer in self.app.layers if layer.visible
+        ]
+        pixel_data = canvas_cython_helpers.pick_color_at_pixel_cy(
+            px, py, visible_layers
+        )
+        if pixel_data:
+            self.pick_color_callback(pixel_data[0], pixel_data[1])
+            return True
         return False
 
     def start_mmb_eyedropper(self, event):
