@@ -5,8 +5,6 @@
 # cython: cdivision=True
 # cython: cpp=True
 
-import numpy as np
-cimport numpy as np
 from collections import defaultdict
 
 from libc.stdio cimport sprintf
@@ -23,7 +21,7 @@ cpdef tuple hex_to_rgb_cy(str hex_color):
     cdef int b = int(hex_color[4:6], 16)
     return (r, g, b)
 
-cpdef np.ndarray[np.uint8_t, ndim=3] render_image(
+cpdef object render_image(
     int width, int height, list layers_data,
     bint use_bg_color, tuple bg_color_rgb, bint render_alpha,
     tuple dirty_bbox = None
@@ -36,10 +34,9 @@ cpdef np.ndarray[np.uint8_t, ndim=3] render_image(
         render_width = max_x - min_x
         render_height = max_y - min_y
 
-    cdef np.ndarray[np.uint8_t, ndim=3] buffer = np.zeros((render_height, render_width, 4), dtype=np.uint8)
-    cdef unsigned char[:, :, ::1] v_buffer = buffer
+    cdef bytearray buffer = bytearray(render_width * render_height * 4)
 
-    cdef int x, y, i, layer_idx, px, py, r, g, b, a
+    cdef int x, y, i, layer_idx, px, py, r, g, b, a, base_idx
     cdef unsigned char e_alpha
     cdef double alpha_norm
     cdef tuple pixel_data, color_rgb
@@ -51,23 +48,25 @@ cpdef np.ndarray[np.uint8_t, ndim=3] render_image(
         for x in range(render_width):
             px = x + min_x
             py = y + min_y
+            base_idx = (y * render_width + x) * 4
             if use_bg_color:
-                v_buffer[y, x, 0] = bg_color_rgb[0]
-                v_buffer[y, x, 1] = bg_color_rgb[1]
-                v_buffer[y, x, 2] = bg_color_rgb[2]
-                v_buffer[y, x, 3] = 255
+                buffer[base_idx] = bg_color_rgb[0]
+                buffer[base_idx + 1] = bg_color_rgb[1]
+                buffer[base_idx + 2] = bg_color_rgb[2]
+                buffer[base_idx + 3] = 255
             else:
                 if (px + py) % 2 == 0:
-                    v_buffer[y, x, 0] = c1_r; v_buffer[y, x, 1] = c1_g; v_buffer[y, x, 2] = c1_b;
+                    buffer[base_idx] = c1_r; buffer[base_idx + 1] = c1_g; buffer[base_idx + 2] = c1_b;
                 else:
-                    v_buffer[y, x, 0] = c2_r; v_buffer[y, x, 1] = c2_g; v_buffer[y, x, 2] = c2_b;
-                v_buffer[y, x, 3] = 255
+                    buffer[base_idx] = c2_r; buffer[base_idx + 1] = c2_g; buffer[base_idx + 2] = c2_b;
+                buffer[base_idx + 3] = 255
 
     for layer_dict in layers_data:
         for (px, py), pixel_data in layer_dict.items():
             if min_x <= px < max_x and min_y <= py < max_y:
                 x = px - min_x
                 y = py - min_y
+                base_idx = (y * render_width + x) * 4
 
                 a = pixel_data[1]
                 if not render_alpha:
@@ -81,9 +80,9 @@ cpdef np.ndarray[np.uint8_t, ndim=3] render_image(
 
                     alpha_norm = e_alpha / 255.0
 
-                    v_buffer[y, x, 0] = blend_channel(r, v_buffer[y, x, 0], alpha_norm)
-                    v_buffer[y, x, 1] = blend_channel(g, v_buffer[y, x, 1], alpha_norm)
-                    v_buffer[y, x, 2] = blend_channel(b, v_buffer[y, x, 2], alpha_norm)
+                    buffer[base_idx] = blend_channel(r, buffer[base_idx], alpha_norm)
+                    buffer[base_idx + 1] = blend_channel(g, buffer[base_idx + 1], alpha_norm)
+                    buffer[base_idx + 2] = blend_channel(b, buffer[base_idx + 2], alpha_norm)
 
     return buffer
 
@@ -213,16 +212,15 @@ cpdef dict render_preview_chunks_cy(
     cdef bint color_blending = tool_options.get("color_blending", False)
 
     cdef dict dirty_chunks = {}
-    cdef int px, py, cx, cy, i, a, alpha_to_use
-    cdef tuple existing_pixel, base_rgb, applied_rgb, rgb_above, chunk_coord
+    cdef int px, py, cx, cy, i, a, alpha_to_use, base_idx, img_x, img_y
+    cdef tuple existing_pixel, base_rgb, applied_rgb, rgb_above, chunk_coord, pixel_above
     cdef str applied_hex
     cdef int applied_alpha
     cdef double alpha_norm, composite_r, composite_g, composite_b, final_r, final_g, final_b
     cdef list pixel_list_for_chunk
     
     cdef dict rendered_chunk_buffers = {}
-    cdef np.ndarray[np.uint8_t, ndim=3] buffer
-    cdef unsigned char[:, :, ::1] v_buffer
+    cdef bytearray buffer
 
     for px, py in new_preview_pixels:
         chunk_coord = (px // chunk_size, py // chunk_size)
@@ -231,8 +229,7 @@ cpdef dict render_preview_chunks_cy(
         dirty_chunks[chunk_coord].append((px, py))
     
     for (cx, cy), pixels_in_chunk in dirty_chunks.items():
-        buffer = np.zeros((chunk_size, chunk_size, 4), dtype=np.uint8)
-        v_buffer = buffer
+        buffer = bytearray(chunk_size * chunk_size * 4)
         rendered_chunk_buffers[(cx, cy)] = buffer
 
         for px, py in pixels_in_chunk:
@@ -272,10 +269,11 @@ cpdef dict render_preview_chunks_cy(
                         final_b = rgb_above[2] * alpha_norm + final_b * (1.0 - alpha_norm)
 
             img_x, img_y = px % chunk_size, py % chunk_size
-            v_buffer[img_y, img_x, 0] = <unsigned char>final_r
-            v_buffer[img_y, img_x, 1] = <unsigned char>final_g
-            v_buffer[img_y, img_x, 2] = <unsigned char>final_b
-            v_buffer[img_y, img_x, 3] = 255
+            base_idx = (img_y * chunk_size + img_x) * 4
+            buffer[base_idx] = <unsigned char>final_r
+            buffer[base_idx + 1] = <unsigned char>final_g
+            buffer[base_idx + 2] = <unsigned char>final_b
+            buffer[base_idx + 3] = 255
 
     return rendered_chunk_buffers
 
@@ -473,3 +471,23 @@ cpdef tuple pick_color_at_pixel_cy(int px, int py, list visible_layers_data):
         if pixel_data and pixel_data[1] > 0:
             return pixel_data
     return None
+
+cpdef dict process_image_data_cy(bytes rgba_data, int width, int height):
+    cdef dict pixel_data = {}
+    cdef int x, y, r, g, b, a, base_idx
+    cdef unsigned char* data = rgba_data
+    cdef char hex_buffer[8]
+
+    for y in range(height):
+        for x in range(width):
+            base_idx = (y * width + x) * 4
+            r = data[base_idx]
+            g = data[base_idx + 1]
+            b = data[base_idx + 2]
+            a = data[base_idx + 3]
+            
+            if a > 0:
+                sprintf(hex_buffer, "#%02X%02X%02X", r, g, b)
+                pixel_data[(x, y)] = (hex_buffer.decode('ascii'), a)
+    
+    return pixel_data
