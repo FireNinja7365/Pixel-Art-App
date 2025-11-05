@@ -7,7 +7,6 @@ import math
 import colorsys
 import re
 import copy
-import numpy
 
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from color_wheel_picker import ColorWheelPicker
@@ -883,9 +882,9 @@ class PixelArtApp:
                 self._initialize_layers()
                 self.layers[0].name = os.path.basename(filename)
 
-                rgba_data = numpy.array(img)
+                rgba_data = img.tobytes()
                 self.layers[0].pixel_data = canvas_cython_helpers.process_image_data_cy(
-                    rgba_data
+                    rgba_data, img.width, img.height
                 )
                 self._clear_history()
                 self.create_canvas()
