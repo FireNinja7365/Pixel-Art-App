@@ -212,12 +212,17 @@ class PixelCanvas(ttk.Frame):
                 bg_rgb,
                 render_alpha,
             )
-            self._full_art_image_cache = Image.fromarray(image_buffer, "RGBA")
+            self._full_art_image_cache = Image.frombytes(
+                "RGBA",
+                (self.app.canvas_width, self.app.canvas_height),
+                bytes(image_buffer),
+            )
             self._force_full_redraw = False
             self._dirty_bbox = None
 
         elif self._dirty_bbox is not None:
-
+            dirty_w = self._dirty_bbox[2] - self._dirty_bbox[0]
+            dirty_h = self._dirty_bbox[3] - self._dirty_bbox[1]
             dirty_buffer = canvas_cython_helpers.render_image(
                 self.app.canvas_width,
                 self.app.canvas_height,
@@ -227,7 +232,9 @@ class PixelCanvas(ttk.Frame):
                 render_alpha,
                 self._dirty_bbox,
             )
-            dirty_image = Image.fromarray(dirty_buffer, "RGBA")
+            dirty_image = Image.frombytes(
+                "RGBA", (dirty_w, dirty_h), bytes(dirty_buffer)
+            )
             self._full_art_image_cache.paste(
                 dirty_image, (self._dirty_bbox[0], self._dirty_bbox[1])
             )
@@ -409,7 +416,9 @@ class PixelCanvas(ttk.Frame):
 
             chunk = self.preview_chunks[(cx, cy)]
 
-            pil_image = Image.fromarray(buffer, "RGBA")
+            pil_image = Image.frombytes(
+                "RGBA", (self.CHUNK_SIZE, self.CHUNK_SIZE), bytes(buffer)
+            )
 
             chunk["pil"].paste(pil_image, mask=pil_image)
 
