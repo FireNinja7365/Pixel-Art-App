@@ -88,20 +88,26 @@ class DeleteLayerAction(Action):
 
 class MoveLayerAction(Action):
 
-    def __init__(self, from_index, to_index, active_index_after):
+    def __init__(self, from_index, to_index, active_index_before, active_index_after):
         self.from_index = from_index
         self.to_index = to_index
+        self.active_index_before = active_index_before
         self.active_index_after = active_index_after
 
     def undo(self, app):
+
         layer = app.layers.pop(self.to_index)
         app.layers.insert(self.from_index, layer)
-        app.active_layer_index = self.from_index
+        app.active_layer_index = self.active_index_before
+        app.pixel_canvas.force_redraw()
+        app._update_layers_ui()
 
     def redo(self, app):
         layer = app.layers.pop(self.from_index)
         app.layers.insert(self.to_index, layer)
         app.active_layer_index = self.active_index_after
+        app.pixel_canvas.force_redraw()
+        app._update_layers_ui()
 
 
 class RenameLayerAction(Action):
