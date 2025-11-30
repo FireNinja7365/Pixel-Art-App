@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk
-from utilities import validate_int_entry, sanitize_int_input
+from utilities import validate_int_entry, sanitize_int_input, handle_slider_click
 
 
 class LayerMenu(tk.Toplevel):
@@ -58,6 +58,9 @@ class LayerMenu(tk.Toplevel):
             length=100,
         )
         self.opacity_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        self.opacity_slider.bind(
+            "<Button-1>", lambda e: handle_slider_click(e, self.opacity_slider)
+        )
 
         vcmd = (self.register(validate_int_entry), "%P")
         self.opacity_entry = ttk.Entry(
