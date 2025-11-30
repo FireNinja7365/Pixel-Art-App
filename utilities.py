@@ -1,3 +1,6 @@
+import re
+
+
 def hex_to_rgb(hex_color_str):
 
     h = hex_color_str.lstrip("#")
@@ -21,3 +24,44 @@ def handle_slider_click(event, slider):
             from_, to = float(slider.cget("from")), float(slider.cget("to"))
             fraction = max(0.0, min(1.0, event.x / widget_size))
             slider.set(from_ + (fraction * (to - from_)))
+
+
+def sanitize_hex_input(hex_str):
+
+    clean = hex_str.lstrip("#")
+
+    is_valid = len(clean) == 6 and all(c in "0123456789abcdefABCDEF" for c in clean)
+    return clean, is_valid
+
+
+def sanitize_int_input(value_str, min_val=0, max_val=255):
+
+    if not value_str:
+        return None
+
+    try:
+        num = int(value_str)
+        if num > max_val:
+            return str(max_val)
+        if num < min_val:
+            return str(min_val)
+    except ValueError:
+        pass
+    return None
+
+
+def validate_hex_entry(value):
+
+    if len(value) > 6:
+        return False
+
+    for char in value:
+        if char not in "0123456789abcdefABCDEF":
+            return False
+
+    return True
+
+
+def validate_int_entry(value):
+
+    return value == "" or value.isdigit()
