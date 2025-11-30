@@ -428,12 +428,15 @@ class PixelArtApp:
         layers_frame.pack(fill=tk.BOTH, expand=True)
         tree_frame = ttk.Frame(layers_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True)
+
+
         self.layers_tree = ttk.Treeview(
-            tree_frame, columns=("vis", "name"), show="headings", selectmode="browse"
+            tree_frame, columns=("vis", "name"), show="tree", selectmode="browse"
         )
-        self.layers_tree.heading("vis", text="")
-        self.layers_tree.heading("name", text="")
+        self.layers_tree.column("#0", width=0, stretch=tk.NO)
         self.layers_tree.column("vis", width=25, anchor="center", stretch=False)
+
+
         self.layers_tree.column("name", stretch=True)
         self.layers_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         tree_scroll = ttk.Scrollbar(
@@ -473,7 +476,7 @@ class PixelArtApp:
                 "",
                 tk.END,
                 iid=str(i),
-                values=("👁" if layer.visible else " ", layer.name),
+                values=("✅" if layer.visible else "❌", layer.name),
                 tags=("active",) if i == self.active_layer_index else (),
             )
         if self.layers and 0 <= self.active_layer_index < len(self.layers):
