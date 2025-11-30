@@ -85,6 +85,9 @@ class PixelArtApp:
         self.fill_shape_var = tk.BooleanVar(value=False)
         self.tool_var = tk.StringVar(value="pencil")
 
+        self.shift_pressed = False
+        self.last_mouse_event = None
+
         self.canvas_menu, self.layer_area_context_menu = (
             None,
             None,
@@ -97,6 +100,15 @@ class PixelArtApp:
         self._initialize_layers()
         self.create_canvas()
         self.root.bind("<Configure>", self.on_window_resize)
+
+        self.root.bind_all("<Tab>", lambda e: "break")
+        self.root.bind_all("<<NextWindow>>", lambda e: "break")
+        self.root.bind_all("<<PrevWindow>>", lambda e: "break")
+
+        self.root.bind("<KeyPress-Shift_L>", self._on_shift_press)
+        self.root.bind("<KeyPress-Shift_R>", self._on_shift_press)
+        self.root.bind("<KeyRelease-Shift_L>", self._on_shift_release)
+        self.root.bind("<KeyRelease-Shift_R>", self._on_shift_release)
         self._update_shape_controls_state()
         self._update_brush_controls_state()
         self._update_color_picker_from_app_state()
@@ -429,13 +441,11 @@ class PixelArtApp:
         tree_frame = ttk.Frame(layers_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True)
 
-
         self.layers_tree = ttk.Treeview(
             tree_frame, columns=("vis", "name"), show="tree", selectmode="browse"
         )
         self.layers_tree.column("#0", width=0, stretch=tk.NO)
         self.layers_tree.column("vis", width=25, anchor="center", stretch=False)
-
 
         self.layers_tree.column("name", stretch=True)
         self.layers_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -691,6 +701,10 @@ class PixelArtApp:
             self._load_image_from_path(filepath)
 
     def _get_tool_options(self):
+        is_aspect_locked = (self.lock_aspect_var.get() or self.shift_pressed) and (
+            str(self.lock_aspect_checkbox.cget("state")) == "normal"
+        )
+
         return {
             "tool": self.tool_var.get(),
             "color": self.current_color,
@@ -698,7 +712,7 @@ class PixelArtApp:
             "brush_size": self.brush_size_var.get(),
             "shape_type": self.shape_type_var.get(),
             "fill_shape": self.fill_shape_var.get(),
-            "lock_aspect": self.lock_aspect_var.get()
+            "lock_aspect": is_aspect_locked
             and (str(self.lock_aspect_checkbox.cget("state")) == "normal"),
             "active_layer": self.active_layer,
             "active_layer_data": self.active_layer_data,
@@ -709,10 +723,32 @@ class PixelArtApp:
         self.pixel_canvas.start_draw(event, self._get_tool_options())
 
     def on_canvas_motion_1(self, event):
+        self.last_mouse_event = event
         self.pixel_canvas.draw(event, self._get_tool_options())
 
     def on_canvas_release_1(self, event):
+        self.last_mouse_event = None
         self.pixel_canvas.stop_draw(event, self._get_tool_options())
+
+    def _on_shift_press(self, event):
+        if not self.shift_pressed:
+            self.shift_pressed = True
+            self._update_shape_preview_if_needed()
+
+    def _on_shift_release(self, event):
+        if self.shift_pressed:
+            self.shift_pressed = False
+            self._update_shape_preview_if_needed()
+
+    def _update_shape_preview_if_needed(self):
+
+        if (
+            self.tool_var.get() == "shape"
+            and hasattr(self, "pixel_canvas")
+            and getattr(self.pixel_canvas, "drawing", False)
+            and self.last_mouse_event
+        ):
+            self.pixel_canvas.draw(self.last_mouse_event, self._get_tool_options())
 
     def _handle_eyedropper_pick(self, color, alpha):
         self.current_color, self.current_alpha = color, alpha
