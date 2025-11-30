@@ -272,20 +272,34 @@ class ColorWheelPicker(ttk.Frame):
 
     def create_hue_wheel(self):
         size = 150
-        radius = center_x = center_y = size // 2
-        image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+
+        supersample = 4
+        render_size = size * supersample
+
+        radius = center_x = center_y = render_size // 2
+
+        image = Image.new("RGBA", (render_size, render_size), (0, 0, 0, 0))
         pixels = image.load()
-        for y in range(size):
-            for x in range(size):
+
+        inner_r_sq = (radius * 0.7) ** 2
+        outer_r_sq = radius**2
+
+        for y in range(render_size):
+            for x in range(render_size):
                 dx, dy = x - center_x, y - center_y
                 dist_sq = dx**2 + dy**2
-                if (radius * 0.7) ** 2 < dist_sq < radius**2:
+
+                if inner_r_sq < dist_sq < outer_r_sq:
                     hue = (math.atan2(-dy, dx) / (2 * math.pi)) % 1.0
                     rgb_float = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
                     pixels[x, y] = tuple(int(c * 255) for c in rgb_float) + (255,)
+
+        image = image.resize((size, size), Image.Resampling.LANCZOS)
+
         self.hue_wheel_image = ImageTk.PhotoImage(image)
+
         self.color_canvas.create_image(
-            center_x, center_y, image=self.hue_wheel_image, tags="hue_area"
+            size // 2, size // 2, image=self.hue_wheel_image, tags="hue_area"
         )
 
     def update_sv_box(self):
