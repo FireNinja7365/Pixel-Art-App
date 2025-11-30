@@ -22,7 +22,7 @@ cpdef tuple hex_to_rgb_cy(str hex_color):
     return (r, g, b)
 
 cpdef object render_image(
-    int width, int height, list layers_data,
+    int width, int height, list layers_info,
     bint use_bg_color, tuple bg_color_rgb, bint render_alpha,
     tuple dirty_bbox = None
 ):
@@ -36,10 +36,11 @@ cpdef object render_image(
 
     cdef bytearray buffer = bytearray(render_width * render_height * 4)
 
-    cdef int x, y, i, layer_idx, px, py, r, g, b, a, base_idx
+    cdef int x, y, i, layer_idx, px, py, r, g, b, a, base_idx, layer_opacity
     cdef unsigned char e_alpha
     cdef double alpha_norm
     cdef tuple pixel_data, color_rgb
+    cdef dict layer_dict
 
     cdef unsigned char c1_r=224, c1_g=224, c1_b=224
     cdef unsigned char c2_r=240, c2_g=240, c2_b=240
@@ -61,7 +62,7 @@ cpdef object render_image(
                     buffer[base_idx] = c2_r; buffer[base_idx + 1] = c2_g; buffer[base_idx + 2] = c2_b;
                 buffer[base_idx + 3] = 255
 
-    for layer_dict in layers_data:
+    for layer_dict, layer_opacity in layers_info:
         for (px, py), pixel_data in layer_dict.items():
             if min_x <= px < max_x and min_y <= py < max_y:
                 x = px - min_x
@@ -69,6 +70,9 @@ cpdef object render_image(
                 base_idx = (y * render_width + x) * 4
 
                 a = pixel_data[1]
+                
+                a = (a * layer_opacity) // 255
+
                 if not render_alpha:
                     e_alpha = 255
                 else:
@@ -88,7 +92,7 @@ cpdef object render_image(
 
 
 cpdef tuple composite_pixel_stack_cy(
-    int px, int py, list all_layers_data, int stop_at_layer_index,
+    int px, int py, list all_layers_info, int stop_at_layer_index,
     bint use_bg_color, tuple bg_color_rgb, bint render_alpha
 ):
     cdef tuple base_rgb
@@ -100,19 +104,22 @@ cpdef tuple composite_pixel_stack_cy(
     cdef double r, g, b
     r, g, b = <double>base_rgb[0], <double>base_rgb[1], <double>base_rgb[2]
 
-    cdef int i, a
+    cdef int i, a, layer_opacity
     cdef unsigned char e_alpha
     cdef double alpha_norm
     cdef tuple pixel_data, color_rgb
-    cdef int layer_count = len(all_layers_data)
+    cdef dict layer_dict
 
     if stop_at_layer_index == -1:
-        stop_at_layer_index = layer_count
+        stop_at_layer_index = len(all_layers_info)
 
     for i in range(stop_at_layer_index):
-        pixel_data = all_layers_data[i].get((px, py))
+        layer_dict, layer_opacity = all_layers_info[i]
+        pixel_data = layer_dict.get((px, py))
         if pixel_data:
             a = pixel_data[1]
+            a = (a * layer_opacity) // 255
+            
             if not render_alpha: e_alpha = 255
             else: e_alpha = a
 
@@ -200,7 +207,7 @@ cpdef set get_stroke_pixels_cy(
 cpdef dict render_preview_chunks_cy(
     set new_preview_pixels,
     dict tool_options,
-    list all_layers_data,
+    list all_layers_info,
     bint use_bg_color, tuple bg_color_rgb, bint render_alpha,
     int chunk_size
 ):
@@ -209,15 +216,20 @@ cpdef dict render_preview_chunks_cy(
     cdef str source_hex = tool_options.get("color")
     cdef int source_alpha = tool_options.get("alpha", 0)
     cdef dict active_layer_data = tool_options["active_layer_data"]
+    cdef int active_layer_opacity = 255
+    if 0 <= active_layer_index < len(all_layers_info):
+        active_layer_opacity = all_layers_info[active_layer_index][1]
+
     cdef bint color_blending = tool_options.get("color_blending", False)
 
     cdef dict dirty_chunks = {}
-    cdef int px, py, cx, cy, i, a, alpha_to_use, base_idx, img_x, img_y
+    cdef int px, py, cx, cy, i, a, alpha_to_use, base_idx, img_x, img_y, layer_opacity
     cdef tuple existing_pixel, base_rgb, applied_rgb, rgb_above, chunk_coord, pixel_above
     cdef str applied_hex
     cdef int applied_alpha
     cdef double alpha_norm, composite_r, composite_g, composite_b, final_r, final_g, final_b
     cdef list pixel_list_for_chunk
+    cdef dict layer_dict
     
     cdef dict rendered_chunk_buffers = {}
     cdef bytearray buffer
@@ -234,7 +246,7 @@ cpdef dict render_preview_chunks_cy(
 
         for px, py in pixels_in_chunk:
             base_rgb = composite_pixel_stack_cy(
-                px, py, all_layers_data, active_layer_index,
+                px, py, all_layers_info, active_layer_index,
                 use_bg_color, bg_color_rgb, render_alpha
             )
 
@@ -246,6 +258,8 @@ cpdef dict render_preview_chunks_cy(
             if color_blending and 0 < source_alpha < 255 and existing_pixel and existing_pixel[1] > 0:
                 applied_hex, applied_alpha = blend_colors_cy(source_hex, source_alpha, existing_pixel[0], existing_pixel[1])
 
+            applied_alpha = (applied_alpha * active_layer_opacity) // 255
+
             composite_r, composite_g, composite_b = base_rgb
             if applied_alpha > 0:
                 alpha_to_use = applied_alpha if render_alpha else 255
@@ -256,10 +270,13 @@ cpdef dict render_preview_chunks_cy(
                 composite_b = applied_rgb[2] * alpha_norm + base_rgb[2] * (1.0 - alpha_norm)
 
             final_r, final_g, final_b = composite_r, composite_g, composite_b
-            for i in range(active_layer_index + 1, len(all_layers_data)):
-                pixel_above = all_layers_data[i].get((px, py))
+            for i in range(active_layer_index + 1, len(all_layers_info)):
+                layer_dict, layer_opacity = all_layers_info[i]
+                pixel_above = layer_dict.get((px, py))
                 if pixel_above and pixel_above[1] > 0:
                     a = pixel_above[1]
+                    a = (a * layer_opacity) // 255
+                    
                     alpha_to_use = a if render_alpha else 255
                     if alpha_to_use > 0:
                         alpha_norm = alpha_to_use / 255.0
@@ -463,12 +480,14 @@ cpdef tuple apply_pixels_cy(set pixels_to_process, dict active_layer_data, str c
 
     return (pixels_before, pixels_after)
 
-cpdef tuple pick_color_at_pixel_cy(int px, int py, list visible_layers_data):
+cpdef tuple pick_color_at_pixel_cy(int px, int py, list visible_layers_info):
     cdef tuple pixel_data
-    cdef int i
-    for i in range(len(visible_layers_data) - 1, -1, -1):
-        pixel_data = visible_layers_data[i].get((px, py))
-        if pixel_data and pixel_data[1] > 0:
+    cdef dict layer_dict
+    cdef int i, layer_opacity
+    for i in range(len(visible_layers_info) - 1, -1, -1):
+        layer_dict, layer_opacity = visible_layers_info[i]
+        pixel_data = layer_dict.get((px, py))
+        if pixel_data and pixel_data[1] > 0 and layer_opacity > 0:
             return pixel_data
     return None
 
