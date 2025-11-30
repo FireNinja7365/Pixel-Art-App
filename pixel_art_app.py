@@ -836,7 +836,11 @@ class PixelArtApp:
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.resizable(False, False)
-        dialog.geometry("250x325")
+
+        x = self.root.winfo_pointerx()
+        y = self.root.winfo_pointery()
+        dialog.geometry(f"250x325+{x }+{y }")
+
         main_frame = ttk.Frame(dialog, padding=15)
         main_frame.pack(fill=tk.BOTH, expand=True)
         state = {"hex": self.canvas_bg_color}
