@@ -209,7 +209,8 @@ cpdef dict render_preview_chunks_cy(
     dict tool_options,
     list all_layers_info,
     bint use_bg_color, tuple bg_color_rgb, bint render_alpha,
-    int chunk_size
+    int chunk_size,
+    int canvas_width, int canvas_height
 ):
     cdef bint is_eraser = tool_options.get("tool") == "eraser"
     cdef int active_layer_index = tool_options["active_layer_index"]
@@ -235,6 +236,9 @@ cpdef dict render_preview_chunks_cy(
     cdef bytearray buffer
 
     for px, py in new_preview_pixels:
+        if px < 0 or px >= canvas_width or py < 0 or py >= canvas_height:
+            continue
+
         chunk_coord = (px // chunk_size, py // chunk_size)
         if chunk_coord not in dirty_chunks:
             dirty_chunks[chunk_coord] = []
@@ -451,7 +455,15 @@ cpdef set get_ellipse_pixels_cy(int x0, int y0, int rx, int ry, bint fill, int c
         pixels.update(full_ellipse - inner_ellipse)
     return pixels
 
-cpdef tuple apply_pixels_cy(set pixels_to_process, dict active_layer_data, str color, int alpha, bint color_blending):
+cpdef tuple apply_pixels_cy(
+    set pixels_to_process,
+    dict active_layer_data,
+    str color,
+    int alpha,
+    bint color_blending,
+    int canvas_width,
+    int canvas_height
+):
     cdef dict pixels_before = {}
     cdef dict pixels_after = {}
     cdef tuple original_pixel, new_pixel_data
@@ -460,6 +472,9 @@ cpdef tuple apply_pixels_cy(set pixels_to_process, dict active_layer_data, str c
     cdef int px, py
     
     for px, py in pixels_to_process:
+        if px < 0 or px >= canvas_width or py < 0 or py >= canvas_height:
+            continue
+
         original_pixel = active_layer_data.get((px, py))
         pixels_before[(px, py)] = original_pixel
         
