@@ -20,8 +20,16 @@ from actions import (
     RenameLayerAction,
     MergeLayerAction,
 )
-from utilities import hex_to_rgb, rgb_to_hex, handle_slider_click
+from utilities import (
+    hex_to_rgb,
+    rgb_to_hex,
+    handle_slider_click,
+    validate_int_entry,
+    sanitize_int_input,
+)
 import canvas_cython_helpers
+
+from layer_menu import LayerMenu
 
 
 class Layer:
@@ -35,6 +43,7 @@ class Layer:
             self.name = name
         self.pixel_data = {}
         self.visible = True
+        self.opacity = 255
 
 
 class PixelArtApp:
@@ -75,8 +84,8 @@ class PixelArtApp:
         self.brush_size_var = tk.IntVar(value=self.brush_size)
         self.fill_shape_var = tk.BooleanVar(value=False)
         self.tool_var = tk.StringVar(value="pencil")
-        self.canvas_menu, self.layer_context_menu, self.layer_area_context_menu = (
-            None,
+
+        self.canvas_menu, self.layer_area_context_menu = (
             None,
             None,
         )
@@ -433,23 +442,7 @@ class PixelArtApp:
         tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.layers_tree.configure(yscrollcommand=tree_scroll.set)
         self.layers_tree.tag_configure("active", background="#cce5ff")
-        self.layer_context_menu = tk.Menu(self.layers_tree, tearoff=0)
-        self.layer_context_menu.add_command(label="Move Up", command=self.move_layer_up)
-        self.layer_context_menu.add_command(
-            label="Move Down", command=self.move_layer_down
-        )
-        self.layer_context_menu.add_separator()
-        self.layer_context_menu.add_command(
-            label="Merge Down", command=self.merge_layer_down
-        )
-        self.layer_context_menu.add_command(
-            label="Duplicate", command=self.duplicate_layer
-        )
-        self.layer_context_menu.add_separator()
-        self.layer_context_menu.add_command(
-            label="Rename", command=self.rename_selected_layer
-        )
-        self.layer_context_menu.add_command(label="Delete", command=self.delete_layer)
+
         self.layer_area_context_menu = tk.Menu(self.layers_tree, tearoff=0)
         self.layer_area_context_menu.add_command(
             label="Add Layer", command=self.add_layer
@@ -458,8 +451,10 @@ class PixelArtApp:
         self.layers_tree.bind("<Button-1>", self._on_layer_tree_click)
         self.layers_tree.bind("<Button-3>", self._on_layer_right_click)
         self.layers_tree.bind("<Double-1>", self._on_layer_rename_start)
+
         buttons_frame = ttk.Frame(layers_frame)
         buttons_frame.pack(fill=tk.X, pady=(10, 0))
+
         ttk.Button(buttons_frame, text="Add Layer", command=self.add_layer).pack(
             fill=tk.X, expand=True, padx=2
         )
@@ -492,6 +487,7 @@ class PixelArtApp:
         if not selected_items:
             return
         new_index = int(selected_items[0])
+
         if new_index != self.active_layer_index:
             self.active_layer_index = new_index
             self._update_layers_ui()
@@ -509,24 +505,14 @@ class PixelArtApp:
 
     def _on_layer_right_click(self, event):
         item_id = self.layers_tree.identify_row(event.y)
+
         if not item_id:
             self.layer_area_context_menu.post(event.x_root, event.y_root)
             return
+
         self.layers_tree.selection_set(item_id)
-        idx, num = int(item_id), len(self.layers)
-        self.layer_context_menu.entryconfig(
-            "Move Up", state=tk.NORMAL if idx < num - 1 else tk.DISABLED
-        )
-        self.layer_context_menu.entryconfig(
-            "Move Down", state=tk.NORMAL if idx > 0 else tk.DISABLED
-        )
-        self.layer_context_menu.entryconfig(
-            "Merge Down", state=tk.NORMAL if idx > 0 else tk.DISABLED
-        )
-        self.layer_context_menu.entryconfig(
-            "Delete", state=tk.NORMAL if num > 1 else tk.DISABLED
-        )
-        self.layer_context_menu.post(event.x_root, event.y_root)
+
+        LayerMenu(self.root, self, int(item_id), event.x_root, event.y_root)
 
     def rename_selected_layer(self):
         selected_items = self.layers_tree.selection()
@@ -623,31 +609,41 @@ class PixelArtApp:
         upper = self.layers[idx]
         lower = self.layers[idx - 1]
 
-        merged_data = lower.pixel_data.copy()
-        for (x, y), (upper_hex, upper_alpha) in upper.pixel_data.items():
-            if upper_alpha == 0:
+        merged_data = {}
+        lower_opacity_factor = lower.opacity / 255.0
+
+        for coord, (hex_val, alpha) in lower.pixel_data.items():
+            baked_alpha = int(alpha * lower_opacity_factor)
+            if baked_alpha > 0:
+                merged_data[coord] = (hex_val, baked_alpha)
+
+        upper_opacity_factor = upper.opacity / 255.0
+
+        for coord, (upper_hex, upper_alpha) in upper.pixel_data.items():
+
+            effective_alpha = int(upper_alpha * upper_opacity_factor)
+
+            if effective_alpha == 0:
                 continue
 
-            original_pixel = merged_data.get((x, y))
-            final_hex, final_alpha = upper_hex, upper_alpha
+            bg_pixel = merged_data.get(coord)
 
-            if (
-                self.color_blending_var.get()
-                and 0 < upper_alpha < 255
-                and original_pixel
-                and original_pixel[1] > 0
-            ):
-                bg_hex, bg_a_int = original_pixel
+            final_hex, final_alpha = upper_hex, effective_alpha
+
+            if self.color_blending_var.get() and 0 < effective_alpha < 255 and bg_pixel:
+                bg_hex, bg_a_int = bg_pixel
                 final_hex, final_alpha = canvas_cython_helpers.blend_colors_cy(
-                    upper_hex, upper_alpha, bg_hex, bg_a_int
+                    upper_hex, effective_alpha, bg_hex, bg_a_int
                 )
 
             if final_alpha > 0:
-                merged_data[(x, y)] = (final_hex, final_alpha)
-            elif (x, y) in merged_data:
-                del merged_data[(x, y)]
+                merged_data[coord] = (final_hex, final_alpha)
+            elif coord in merged_data:
+                del merged_data[coord]
 
         lower.pixel_data = merged_data
+        lower.opacity = 255
+
         self.layers.pop(idx)
         self.active_layer_index = idx - 1
 
@@ -669,6 +665,7 @@ class PixelArtApp:
             copy.deepcopy(orig_layer.pixel_data),
             orig_layer.visible,
         )
+        new_layer.opacity = orig_layer.opacity
         action = DuplicateLayerAction(new_layer, insert_pos, prev_idx)
         action.redo(self)
         self.add_action(action)
@@ -933,9 +930,15 @@ class PixelArtApp:
                 layer_img = Image.new(
                     "RGBA", (self.canvas_width, self.canvas_height), (0, 0, 0, 0)
                 )
+                layer_opacity_factor = layer.opacity / 255.0
+
                 for (x, y), (h, a) in layer.pixel_data.items():
                     if h != "transparent" and a > 0:
-                        layer_img.putpixel((x, y), hex_to_rgb(h) + (a,))
+
+                        final_a = int(a * layer_opacity_factor)
+                        if final_a > 0:
+                            layer_img.putpixel((x, y), hex_to_rgb(h) + (final_a,))
+
                 img = Image.alpha_composite(img, layer_img)
             img.save(filename, "PNG")
             if filename == self.current_filename or self.current_filename is None:
