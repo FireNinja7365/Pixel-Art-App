@@ -71,6 +71,9 @@ class PixelArtApp:
         self.layers, self.active_layer_index = [], -1
         self.undo_stack, self.redo_stack = [], []
 
+        self.drag_start_item = None
+        self.drag_floating_window = None
+
         self.last_known_width = 0
         self.last_known_height = 0
 
@@ -465,6 +468,10 @@ class PixelArtApp:
         self.layers_tree.bind("<Button-3>", self._on_layer_right_click)
         self.layers_tree.bind("<Double-1>", self._on_layer_rename_start)
 
+        self.layers_tree.bind("<ButtonPress-1>", self.on_layer_drag_start, add="+")
+        self.layers_tree.bind("<B1-Motion>", self.on_layer_drag_motion, add="+")
+        self.layers_tree.bind("<ButtonRelease-1>", self.on_layer_drag_release, add="+")
+
         buttons_frame = ttk.Frame(layers_frame)
         buttons_frame.pack(fill=tk.X, pady=(10, 0))
 
@@ -496,6 +503,8 @@ class PixelArtApp:
             self.layers_tree.see(active_item_id)
 
     def _on_layer_select(self, event):
+        if self.drag_start_item:
+            return
         selected_items = self.layers_tree.selection()
         if not selected_items:
             return
@@ -515,6 +524,102 @@ class PixelArtApp:
                 self.layers[layer_index].visible = not self.layers[layer_index].visible
                 self.pixel_canvas.force_redraw()
                 self._update_layers_ui()
+                return "break"
+
+    def on_layer_drag_start(self, event):
+        region = self.layers_tree.identify_region(event.x, event.y)
+        if region == "tree" or region == "cell":
+            item = self.layers_tree.identify_row(event.y)
+            if item:
+                self.drag_start_item = item
+
+                item_values = self.layers_tree.item(item, "values")
+
+                if item_values:
+                    display_text = f"{item_values [0 ]} {item_values [1 ]}"
+
+                    self.drag_floating_window = tk.Toplevel(self.root)
+                    self.drag_floating_window.overrideredirect(True)
+                    self.drag_floating_window.attributes("-topmost", True)
+
+                    lbl = tk.Label(
+                        self.drag_floating_window,
+                        text=display_text,
+                        bg="#e1e1e1",
+                        fg="#000000",
+                        relief="solid",
+                        borderwidth=1,
+                    )
+                    lbl.pack()
+
+                    self.drag_floating_window.geometry(
+                        f"+{event .x_root +15 }+{event .y_root }"
+                    )
+                    self.layers_tree.item(item, values=("", ""))
+
+    def on_layer_drag_motion(self, event):
+
+        if self.drag_floating_window:
+            self.drag_floating_window.geometry(
+                f"+{event .x_root +15 }+{event .y_root }"
+            )
+
+        if self.drag_start_item:
+            target = self.layers_tree.identify_row(event.y)
+            if target:
+                self.layers_tree.selection_set(target)
+            return "break"
+
+    def on_layer_drag_release(self, event):
+
+        if self.drag_floating_window:
+            self.drag_floating_window.destroy()
+            self.drag_floating_window = None
+
+        if not self.drag_start_item:
+            return
+
+        target_item = self.layers_tree.identify_row(event.y)
+        to_index = -1
+
+        if target_item:
+            to_index = int(target_item)
+        else:
+
+            if event.y < 0:
+
+                to_index = len(self.layers) - 1
+            else:
+
+                to_index = 0
+
+        from_index = int(self.drag_start_item)
+
+        self.drag_start_item = None
+
+        if to_index != -1 and to_index != from_index:
+
+            prev_active_index = self.active_layer_index
+            active_layer_obj = self.layers[self.active_layer_index]
+
+            layer_to_move = self.layers.pop(from_index)
+            self.layers.insert(to_index, layer_to_move)
+
+            self.active_layer_index = self.layers.index(active_layer_obj)
+
+            action = MoveLayerAction(
+                from_index=from_index,
+                to_index=to_index,
+                active_index_before=prev_active_index,
+                active_index_after=self.active_layer_index,
+            )
+            self.add_action(action)
+            self.pixel_canvas.force_redraw()
+            self._update_layers_ui()
+        else:
+            self._update_layers_ui()
+
+        self.drag_start_item = None
 
     def _on_layer_right_click(self, event):
         item_id = self.layers_tree.identify_row(event.y)
@@ -583,12 +688,14 @@ class PixelArtApp:
         idx = self.active_layer_index
         if idx >= len(self.layers) - 1:
             return
+        prev_active_idx = self.active_layer_index
         self.layers[idx], self.layers[idx + 1] = self.layers[idx + 1], self.layers[idx]
         self.active_layer_index += 1
         self.add_action(
             MoveLayerAction(
                 from_index=idx,
                 to_index=idx + 1,
+                active_index_before=prev_active_idx,
                 active_index_after=self.active_layer_index,
             )
         )
@@ -599,12 +706,14 @@ class PixelArtApp:
         idx = self.active_layer_index
         if idx <= 0:
             return
+        prev_active_idx = self.active_layer_index
         self.layers[idx], self.layers[idx - 1] = self.layers[idx - 1], self.layers[idx]
         self.active_layer_index -= 1
         self.add_action(
             MoveLayerAction(
                 from_index=idx,
                 to_index=idx - 1,
+                active_index_before=prev_active_idx,
                 active_index_after=self.active_layer_index,
             )
         )
