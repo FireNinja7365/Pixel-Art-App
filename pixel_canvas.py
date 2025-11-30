@@ -44,8 +44,52 @@ class PixelCanvas(ttk.Frame):
         self._bind_events()
 
     def _setup_widgets(self):
-        v_scroll = ttk.Scrollbar(self, orient=tk.VERTICAL)
-        h_scroll = ttk.Scrollbar(self, orient=tk.HORIZONTAL)
+
+        style = ttk.Style()
+
+        style.layout(
+            "NoArrows.Vertical.TScrollbar",
+            [
+                (
+                    "Vertical.Scrollbar.trough",
+                    {
+                        "children": [
+                            (
+                                "Vertical.Scrollbar.thumb",
+                                {"expand": "1", "sticky": "nswe"},
+                            )
+                        ],
+                        "sticky": "ns",
+                    },
+                )
+            ],
+        )
+
+        style.layout(
+            "NoArrows.Horizontal.TScrollbar",
+            [
+                (
+                    "Horizontal.Scrollbar.trough",
+                    {
+                        "children": [
+                            (
+                                "Horizontal.Scrollbar.thumb",
+                                {"expand": "1", "sticky": "nswe"},
+                            )
+                        ],
+                        "sticky": "ew",
+                    },
+                )
+            ],
+        )
+
+        v_scroll = ttk.Scrollbar(
+            self, orient=tk.VERTICAL, style="NoArrows.Vertical.TScrollbar"
+        )
+        h_scroll = ttk.Scrollbar(
+            self, orient=tk.HORIZONTAL, style="NoArrows.Horizontal.TScrollbar"
+        )
+
         self.canvas = tk.Canvas(
             self,
             bg="#C0C0C0",
@@ -58,6 +102,39 @@ class PixelCanvas(ttk.Frame):
         v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        v_scroll.bind("<Button-1>", lambda e: self._handle_scroll_click(e, "vertical"))
+        h_scroll.bind(
+            "<Button-1>", lambda e: self._handle_scroll_click(e, "horizontal")
+        )
+
+    def _handle_scroll_click(self, event, orientation):
+        scrollbar = event.widget
+
+        if "thumb" in scrollbar.identify(event.x, event.y):
+            return
+
+        if orientation == "vertical":
+            total_len = scrollbar.winfo_height()
+            click_pos = event.y
+            view_get = self.canvas.yview
+            view_moveto = self.canvas.yview_moveto
+        else:
+            total_len = scrollbar.winfo_width()
+            click_pos = event.x
+            view_get = self.canvas.xview
+            view_moveto = self.canvas.xview_moveto
+
+        if total_len > 0:
+            click_ratio = click_pos / total_len
+            start, end = view_get()
+            viewport_ratio = end - start
+
+            new_start = click_ratio - (viewport_ratio / 2)
+            view_moveto(new_start)
+            self._update_visible_canvas_image()
+
+        return "break"
 
     def _bind_events(self):
         self.canvas.bind("<Button-2>", self.start_mmb_eyedropper)
@@ -195,8 +272,10 @@ class PixelCanvas(ttk.Frame):
             )
             return
 
-        visible_layers_data = [
-            layer.pixel_data for layer in self.app.layers if layer.visible
+        visible_layers_info = [
+            (layer.pixel_data, layer.opacity)
+            for layer in self.app.layers
+            if layer.visible
         ]
         use_bg = self.app.show_canvas_background_var.get()
         bg_rgb = canvas_cython_helpers.hex_to_rgb_cy(self.app.canvas_bg_color)
@@ -207,7 +286,7 @@ class PixelCanvas(ttk.Frame):
             image_buffer = canvas_cython_helpers.render_image(
                 self.app.canvas_width,
                 self.app.canvas_height,
-                visible_layers_data,
+                visible_layers_info,
                 use_bg,
                 bg_rgb,
                 render_alpha,
@@ -226,7 +305,7 @@ class PixelCanvas(ttk.Frame):
             dirty_buffer = canvas_cython_helpers.render_image(
                 self.app.canvas_width,
                 self.app.canvas_height,
-                visible_layers_data,
+                visible_layers_info,
                 use_bg,
                 bg_rgb,
                 render_alpha,
@@ -385,8 +464,10 @@ class PixelCanvas(ttk.Frame):
 
         tool_opts["color_blending"] = self.app.color_blending_var.get()
 
-        visible_layers_data = [
-            layer.pixel_data for layer in self.app.layers if layer.visible
+        visible_layers_info = [
+            (layer.pixel_data, layer.opacity)
+            for layer in self.app.layers
+            if layer.visible
         ]
         use_bg = self.app.show_canvas_background_var.get()
         bg_rgb = canvas_cython_helpers.hex_to_rgb_cy(self.app.canvas_bg_color)
@@ -395,7 +476,7 @@ class PixelCanvas(ttk.Frame):
         rendered_buffers = canvas_cython_helpers.render_preview_chunks_cy(
             self.new_preview_pixels,
             tool_opts,
-            visible_layers_data,
+            visible_layers_info,
             use_bg,
             bg_rgb,
             render_alpha,
@@ -706,11 +787,13 @@ class PixelCanvas(ttk.Frame):
     def _core_pick_color_at_pixel(self, px, py):
         if px is None:
             return False
-        visible_layers = [
-            layer.pixel_data for layer in self.app.layers if layer.visible
+        visible_layers_info = [
+            (layer.pixel_data, layer.opacity)
+            for layer in self.app.layers
+            if layer.visible
         ]
         pixel_data = canvas_cython_helpers.pick_color_at_pixel_cy(
-            px, py, visible_layers
+            px, py, visible_layers_info
         )
         if pixel_data:
             self.pick_color_callback(pixel_data[0], pixel_data[1])
