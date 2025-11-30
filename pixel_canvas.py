@@ -437,14 +437,12 @@ class PixelCanvas(ttk.Frame):
 
     def get_pixel_coords(self, event_x, event_y):
         canvas_x, canvas_y = self.canvas.canvasx(event_x), self.canvas.canvasy(event_y)
-        px, py = int(canvas_x / self.app.pixel_size), int(
+
+        px, py = math.floor(canvas_x / self.app.pixel_size), math.floor(
             canvas_y / self.app.pixel_size
         )
-        return (
-            (px, py)
-            if 0 <= px < self.app.canvas_width and 0 <= py < self.app.canvas_height
-            else (None, None)
-        )
+
+        return px, py
 
     def _schedule_preview_render(self):
         if self._after_id_preview_render is None:
@@ -481,6 +479,8 @@ class PixelCanvas(ttk.Frame):
             bg_rgb,
             render_alpha,
             self.CHUNK_SIZE,
+            self.app.canvas_width,
+            self.app.canvas_height,
         )
         self.new_preview_pixels.clear()
 
@@ -565,12 +565,14 @@ class PixelCanvas(ttk.Frame):
     def draw(self, event, tool_options):
         if not self.drawing or self.app.eyedropper_mode:
             return
-        curr_px, curr_py = self.get_pixel_coords(event.x, event.y)
+
         tool = tool_options["tool"]
+
+        curr_px, curr_py = self.get_pixel_coords(event.x, event.y)
 
         if tool == "shape":
 
-            if curr_px is None or self.start_shape_point is None:
+            if self.start_shape_point is None:
                 return
             if self.preview_shape_item:
                 self.canvas.delete(self.preview_shape_item)
@@ -628,9 +630,7 @@ class PixelCanvas(ttk.Frame):
                 self.canvas.tag_raise(self.preview_shape_item)
 
         elif tool != "fill":
-            if curr_px is None:
-                self.last_draw_pixel_x = self.last_draw_pixel_y = None
-                return
+
             if (curr_px, curr_py) == (self.last_draw_pixel_x, self.last_draw_pixel_y):
                 return
 
@@ -672,9 +672,10 @@ class PixelCanvas(ttk.Frame):
             if self.preview_shape_item:
                 self.canvas.delete(self.preview_shape_item)
                 self.preview_shape_item = None
+
             end_px, end_py = self.get_pixel_coords(event.x, event.y)
 
-            if self.start_shape_point and end_px is not None:
+            if self.start_shape_point:
                 x0, y0 = self.start_shape_point
                 shape_type = tool_options["shape_type"]
                 lock_aspect = tool_options["lock_aspect"]
@@ -718,6 +719,7 @@ class PixelCanvas(ttk.Frame):
                             self.app.canvas_height,
                         )
                     )
+
             self.start_shape_point = None
 
         elif tool in ["pencil", "eraser"]:
@@ -738,6 +740,8 @@ class PixelCanvas(ttk.Frame):
                 color,
                 alpha,
                 self.app.color_blending_var.get(),
+                self.app.canvas_width,
+                self.app.canvas_height,
             )
 
             if pixels_before:
@@ -751,7 +755,7 @@ class PixelCanvas(ttk.Frame):
 
     def start_draw(self, event, tool_options):
         px, py = self.get_pixel_coords(event.x, event.y)
-        if px is None or not tool_options["active_layer"]:
+        if not tool_options["active_layer"]:
             return
         if self.app.eyedropper_mode:
             self.app.pick_color_from_canvas_tool(px, py)
@@ -785,8 +789,6 @@ class PixelCanvas(ttk.Frame):
             self._schedule_preview_render()
 
     def _core_pick_color_at_pixel(self, px, py):
-        if px is None:
-            return False
         visible_layers_info = [
             (layer.pixel_data, layer.opacity)
             for layer in self.app.layers
@@ -802,8 +804,6 @@ class PixelCanvas(ttk.Frame):
 
     def start_mmb_eyedropper(self, event):
         px, py = self.get_pixel_coords(event.x, event.y)
-        if px is None:
-            return
         self.mmb_eyedropper_active = True
         self.original_cursor_before_mmb = self.canvas.cget("cursor")
         self.canvas.configure(cursor="dotbox")
