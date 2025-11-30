@@ -3,9 +3,16 @@ from tkinter import ttk
 from PIL import Image, ImageTk, ImageDraw
 import math
 import colorsys
-import re
 
-from utilities import hex_to_rgb, rgb_to_hex, handle_slider_click
+from utilities import (
+    hex_to_rgb,
+    rgb_to_hex,
+    handle_slider_click,
+    sanitize_hex_input,
+    sanitize_int_input,
+    validate_hex_entry,
+    validate_int_entry,
+)
 
 
 class ColorWheelPicker(ttk.Frame):
@@ -81,10 +88,20 @@ class ColorWheelPicker(ttk.Frame):
             tk.StringVar(),
             tk.StringVar(),
         )
+
         ttk.Label(color_inputs_frame, text="HEX:", width=5).grid(
             row=0, column=0, padx=(0, 5), sticky="w"
         )
-        hex_entry = ttk.Entry(color_inputs_frame, textvariable=self.hex_var, width=10)
+
+        vcmd_hex = (self.register(validate_hex_entry), "%P")
+
+        hex_entry = ttk.Entry(
+            color_inputs_frame,
+            textvariable=self.hex_var,
+            width=10,
+            validate="key",
+            validatecommand=vcmd_hex,
+        )
         hex_entry.grid(row=0, column=1, columnspan=3, sticky="we")
         hex_entry.bind("<KeyRelease>", self._on_hex_input)
         hex_entry.bind("<FocusOut>", self._on_hex_input)
@@ -92,14 +109,16 @@ class ColorWheelPicker(ttk.Frame):
         ttk.Label(color_inputs_frame, text="RGB:", width=5).grid(
             row=1, column=0, padx=(0, 5), pady=(5, 0), sticky="w"
         )
-        vcmd = (self.register(lambda v: v == "" or v.isdigit()), "%P")
+
+        vcmd_int = (self.register(validate_int_entry), "%P")
+
         for i, var in enumerate([self.r_var, self.g_var, self.b_var]):
             entry = ttk.Entry(
                 color_inputs_frame,
                 textvariable=var,
                 width=4,
                 validate="key",
-                validatecommand=vcmd,
+                validatecommand=vcmd_int,
             )
             entry.grid(row=1, column=i + 1, pady=(5, 0), sticky="w")
             entry.bind("<KeyRelease>", self._on_rgb_input)
@@ -115,7 +134,7 @@ class ColorWheelPicker(ttk.Frame):
                 textvariable=self.alpha_var,
                 width=6,
                 validate="key",
-                validatecommand=vcmd,
+                validatecommand=vcmd_int,
             )
             alpha_entry.pack(side=tk.LEFT, padx=(0, 10))
             alpha_entry.bind("<KeyRelease>", self._on_alpha_entry_change)
@@ -332,21 +351,23 @@ class ColorWheelPicker(ttk.Frame):
     def _on_hex_input(self, event):
         if self._is_updating:
             return
-        hex_val = self.hex_var.get().lstrip("#")
-        if len(hex_val) > 6:
-            hex_val = hex_val[:6]
-            self.hex_var.set(hex_val)
-        if re.fullmatch(r"[0-9a-fA-F]{6}", hex_val):
-            self.set_color(f"#{hex_val .lower ()}")
+
+        current_val = self.hex_var.get()
+
+        sanitized_val, is_valid = sanitize_hex_input(current_val)
+
+        if is_valid:
+            self.set_color(f"#{sanitized_val .lower ()}")
 
     def _on_rgb_input(self, event=None):
         if self._is_updating:
             return
         try:
             for var in [self.r_var, self.g_var, self.b_var]:
-                if val_str := var.get():
-                    if int(val_str) > 255:
-                        var.set("255")
+                sanitized = sanitize_int_input(var.get())
+                if sanitized is not None:
+                    var.set(sanitized)
+
             r, g, b = (
                 int(self.r_var.get() or 0),
                 int(self.g_var.get() or 0),
@@ -371,12 +392,14 @@ class ColorWheelPicker(ttk.Frame):
         if self._is_updating:
             return
         try:
-            if value_str := self.alpha_var.get():
-                num = int(value_str)
-                if num > 255:
-                    self.alpha_var.set("255")
+            sanitized = sanitize_int_input(self.alpha_var.get())
+            if sanitized is not None:
+                self.alpha_var.set(sanitized)
+                if sanitized != event.widget.get():
                     event.widget.icursor(tk.END)
-                self.alpha = max(0, min(255, int(self.alpha_var.get())))
+
+            if self.alpha_var.get():
+                self.alpha = int(self.alpha_var.get())
                 self._update_ui()
                 self._fire_callback()
         except (ValueError, tk.TclError):
