@@ -1,49 +1,19 @@
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, colorchooser, simpledialog
-from PIL import Image, ImageTk, ImageDraw
+from tkinter import ttk, filedialog, messagebox
+from PIL import Image
 from pathlib import Path
 import os
 import math
-import colorsys
-import re
 import copy
 
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from color_wheel_picker import ColorWheelPicker
 from pixel_canvas import PixelCanvas
-from actions import (
-    PixelAction,
-    AddLayerAction,
-    DuplicateLayerAction,
-    DeleteLayerAction,
-    MoveLayerAction,
-    RenameLayerAction,
-    MergeLayerAction,
-)
-from utilities import (
-    hex_to_rgb,
-    rgb_to_hex,
-    handle_slider_click,
-    validate_int_entry,
-    sanitize_int_input,
-)
+from utilities import hex_to_rgb, rgb_to_hex, handle_slider_click
 import canvas_cython_helpers
 
-from layer_menu import LayerMenu
 
-
-class Layer:
-    _counter = 1
-
-    def __init__(self, name=None):
-        if name is None:
-            self.name = f"Layer {Layer ._counter }"
-            Layer._counter += 1
-        else:
-            self.name = name
-        self.pixel_data = {}
-        self.visible = True
-        self.opacity = 255
+from layer_menu import LayerPanel
 
 
 class PixelArtApp:
@@ -68,11 +38,8 @@ class PixelArtApp:
         self.current_tool, self.last_used_tool = "pencil", "pencil"
         self.eyedropper_mode = False
         self.current_filename = None
-        self.layers, self.active_layer_index = [], -1
-        self.undo_stack, self.redo_stack = [], []
 
-        self.drag_start_item = None
-        self.drag_floating_window = None
+        self.undo_stack, self.redo_stack = [], []
 
         self.last_known_width = 0
         self.last_known_height = 0
@@ -91,16 +58,13 @@ class PixelArtApp:
         self.shift_pressed = False
         self.last_mouse_event = None
 
-        self.canvas_menu, self.layer_area_context_menu = (
-            None,
-            None,
-        )
+        self.canvas_menu = None
 
         self.setup_menu()
         self.setup_ui()
-        self.setup_layers_ui()
+
         self.setup_drag_and_drop()
-        self._initialize_layers()
+
         self.create_canvas()
         self.root.bind("<Configure>", self.on_window_resize)
 
@@ -119,12 +83,24 @@ class PixelArtApp:
         self._update_save_background_menu_state()
 
     @property
+    def layers(self):
+        return self.layer_panel.layers
+
+    @layers.setter
+    def layers(self, value):
+        self.layer_panel.layers = value
+
+    @property
+    def active_layer_index(self):
+        return self.layer_panel.active_layer_index
+
+    @active_layer_index.setter
+    def active_layer_index(self, value):
+        self.layer_panel.active_layer_index = value
+
+    @property
     def active_layer(self):
-        return (
-            self.layers[self.active_layer_index]
-            if self.layers and 0 <= self.active_layer_index < len(self.layers)
-            else None
-        )
+        return self.layer_panel.active_layer
 
     @property
     def active_layer_data(self):
@@ -226,7 +202,7 @@ class PixelArtApp:
         action.undo(self)
         self.redo_stack.append(action)
         self.pixel_canvas.force_redraw()
-        self._update_layers_ui()
+        self.layer_panel.update_ui()
         self._update_history_controls()
 
     def redo(self, event=None):
@@ -236,7 +212,7 @@ class PixelArtApp:
         action.redo(self)
         self.undo_stack.append(action)
         self.pixel_canvas.force_redraw()
-        self._update_layers_ui()
+        self.layer_panel.update_ui()
         self._update_history_controls()
 
     def show_resize_dialog(self):
@@ -438,361 +414,13 @@ class PixelArtApp:
         self.pixel_canvas.canvas.bind("<ButtonRelease-1>", self.on_canvas_release_1)
         self._update_canvas_workarea_color()
 
+        self.setup_layers_ui()
+
     def setup_layers_ui(self):
         layers_frame = ttk.LabelFrame(self.right_panel, text="Layers", padding=10)
         layers_frame.pack(fill=tk.BOTH, expand=True)
-        tree_frame = ttk.Frame(layers_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.layers_tree = ttk.Treeview(
-            tree_frame, columns=("vis", "name"), show="tree", selectmode="browse"
-        )
-        self.layers_tree.column("#0", width=0, stretch=tk.NO)
-        self.layers_tree.column("vis", width=25, anchor="center", stretch=False)
-
-        self.layers_tree.column("name", stretch=True)
-        self.layers_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        tree_scroll = ttk.Scrollbar(
-            tree_frame, orient="vertical", command=self.layers_tree.yview
-        )
-        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.layers_tree.configure(yscrollcommand=tree_scroll.set)
-        self.layers_tree.tag_configure("active", background="#cce5ff")
-
-        self.layer_area_context_menu = tk.Menu(self.layers_tree, tearoff=0)
-        self.layer_area_context_menu.add_command(
-            label="Add Layer", command=self.add_layer
-        )
-        self.layers_tree.bind("<<TreeviewSelect>>", self._on_layer_select)
-        self.layers_tree.bind("<Button-1>", self._on_layer_tree_click)
-        self.layers_tree.bind("<Button-3>", self._on_layer_right_click)
-        self.layers_tree.bind("<Double-1>", self._on_layer_rename_start)
-
-        self.layers_tree.bind("<ButtonPress-1>", self.on_layer_drag_start, add="+")
-        self.layers_tree.bind("<B1-Motion>", self.on_layer_drag_motion, add="+")
-        self.layers_tree.bind("<ButtonRelease-1>", self.on_layer_drag_release, add="+")
-
-        buttons_frame = ttk.Frame(layers_frame)
-        buttons_frame.pack(fill=tk.X, pady=(10, 0))
-
-        ttk.Button(buttons_frame, text="Add Layer", command=self.add_layer).pack(
-            fill=tk.X, expand=True, padx=2
-        )
-
-    def _initialize_layers(self):
-        Layer._counter = 1
-        self.layers.clear()
-        self.active_layer_index = -1
-        self.add_layer(select=True, add_to_history=False)
-
-    def _update_layers_ui(self):
-        for item in self.layers_tree.get_children():
-            self.layers_tree.delete(item)
-        for i, layer in reversed(list(enumerate(self.layers))):
-            self.layers_tree.insert(
-                "",
-                tk.END,
-                iid=str(i),
-                values=("✅" if layer.visible else "❌", layer.name),
-                tags=("active",) if i == self.active_layer_index else (),
-            )
-        if self.layers and 0 <= self.active_layer_index < len(self.layers):
-            active_item_id = str(self.active_layer_index)
-            if active_item_id not in self.layers_tree.selection():
-                self.layers_tree.selection_set(active_item_id)
-            self.layers_tree.see(active_item_id)
-
-    def _on_layer_select(self, event):
-        if self.drag_start_item:
-            return
-        selected_items = self.layers_tree.selection()
-        if not selected_items:
-            return
-        new_index = int(selected_items[0])
-
-        if new_index != self.active_layer_index:
-            self.active_layer_index = new_index
-            self._update_layers_ui()
-
-    def _on_layer_tree_click(self, event):
-        region = self.layers_tree.identify_region(event.x, event.y)
-        if region == "cell":
-            item_id = self.layers_tree.identify_row(event.y)
-            column = self.layers_tree.identify_column(event.x)
-            if item_id and column == "#1":
-                layer_index = int(item_id)
-                self.layers[layer_index].visible = not self.layers[layer_index].visible
-                self.pixel_canvas.force_redraw()
-                self._update_layers_ui()
-                return "break"
-
-    def on_layer_drag_start(self, event):
-        region = self.layers_tree.identify_region(event.x, event.y)
-        if region == "tree" or region == "cell":
-            item = self.layers_tree.identify_row(event.y)
-            if item:
-                self.drag_start_item = item
-
-                item_values = self.layers_tree.item(item, "values")
-
-                if item_values:
-                    display_text = f"{item_values [0 ]} {item_values [1 ]}"
-
-                    self.drag_floating_window = tk.Toplevel(self.root)
-                    self.drag_floating_window.overrideredirect(True)
-                    self.drag_floating_window.attributes("-topmost", True)
-
-                    lbl = tk.Label(
-                        self.drag_floating_window,
-                        text=display_text,
-                        bg="#e1e1e1",
-                        fg="#000000",
-                        relief="solid",
-                        borderwidth=1,
-                    )
-                    lbl.pack()
-
-                    self.drag_floating_window.geometry(
-                        f"+{event .x_root +15 }+{event .y_root }"
-                    )
-                    self.layers_tree.item(item, values=("", ""))
-
-    def on_layer_drag_motion(self, event):
-
-        if self.drag_floating_window:
-            self.drag_floating_window.geometry(
-                f"+{event .x_root +15 }+{event .y_root }"
-            )
-
-        if self.drag_start_item:
-            target = self.layers_tree.identify_row(event.y)
-            if target:
-                self.layers_tree.selection_set(target)
-            return "break"
-
-    def on_layer_drag_release(self, event):
-
-        if self.drag_floating_window:
-            self.drag_floating_window.destroy()
-            self.drag_floating_window = None
-
-        if not self.drag_start_item:
-            return
-
-        target_item = self.layers_tree.identify_row(event.y)
-        to_index = -1
-
-        if target_item:
-            to_index = int(target_item)
-        else:
-
-            if event.y < 0:
-
-                to_index = len(self.layers) - 1
-            else:
-
-                to_index = 0
-
-        from_index = int(self.drag_start_item)
-
-        self.drag_start_item = None
-
-        if to_index != -1 and to_index != from_index:
-
-            prev_active_index = self.active_layer_index
-            active_layer_obj = self.layers[self.active_layer_index]
-
-            layer_to_move = self.layers.pop(from_index)
-            self.layers.insert(to_index, layer_to_move)
-
-            self.active_layer_index = self.layers.index(active_layer_obj)
-
-            action = MoveLayerAction(
-                from_index=from_index,
-                to_index=to_index,
-                active_index_before=prev_active_index,
-                active_index_after=self.active_layer_index,
-            )
-            self.add_action(action)
-            self.pixel_canvas.force_redraw()
-            self._update_layers_ui()
-        else:
-            self._update_layers_ui()
-
-        self.drag_start_item = None
-
-    def _on_layer_right_click(self, event):
-        item_id = self.layers_tree.identify_row(event.y)
-
-        if not item_id:
-            self.layer_area_context_menu.post(event.x_root, event.y_root)
-            return
-
-        self.layers_tree.selection_set(item_id)
-
-        LayerMenu(self.root, self, int(item_id), event.x_root, event.y_root)
-
-    def rename_selected_layer(self):
-        selected_items = self.layers_tree.selection()
-        if not selected_items:
-            return
-        layer_index = int(selected_items[0])
-        x, y, width, height = self.layers_tree.bbox(selected_items[0], "name")
-        entry = ttk.Entry(self.layers_tree)
-        entry.place(x=x, y=y, width=width, height=height)
-        entry.insert(0, self.layers[layer_index].name)
-        entry.focus_force()
-        entry.select_range(0, "end")
-
-        def on_finish(e):
-            old_name = self.layers[layer_index].name
-            new_name = entry.get().strip()
-            if new_name and new_name != old_name:
-                self.layers[layer_index].name = new_name
-                self.add_action(RenameLayerAction(layer_index, old_name, new_name))
-            entry.destroy()
-            self._update_layers_ui()
-
-        entry.bind("<Return>", on_finish)
-        entry.bind("<FocusOut>", on_finish)
-
-    def _on_layer_rename_start(self, event):
-        region = self.layers_tree.identify_region(event.x, event.y)
-        if region == "cell" and self.layers_tree.identify_column(event.x) == "#2":
-            if item_id := self.layers_tree.identify_row(event.y):
-                self.layers_tree.selection_set(item_id)
-                self.rename_selected_layer()
-
-    def add_layer(self, name=None, select=False, add_to_history=True):
-        new_layer, prev_idx = Layer(name), self.active_layer_index
-        insert_pos = prev_idx + 1 if prev_idx != -1 else 0
-        self.layers.insert(insert_pos, new_layer)
-        self.active_layer_index = insert_pos
-        if add_to_history:
-            self.add_action(AddLayerAction(new_layer, insert_pos, prev_idx))
-        self._update_layers_ui()
-
-    def delete_layer(self):
-        if len(self.layers) <= 1:
-            return
-        prev_idx, del_idx = self.active_layer_index, self.active_layer_index
-        deleted_layer = self.layers[del_idx]
-        del self.layers[del_idx]
-        new_idx = prev_idx if prev_idx < len(self.layers) else len(self.layers) - 1
-        self.active_layer_index = new_idx
-        self.add_action(DeleteLayerAction(deleted_layer, del_idx, prev_idx, new_idx))
-        self.pixel_canvas.force_redraw()
-        self._update_layers_ui()
-
-    def move_layer_up(self):
-        idx = self.active_layer_index
-        if idx >= len(self.layers) - 1:
-            return
-        prev_active_idx = self.active_layer_index
-        self.layers[idx], self.layers[idx + 1] = self.layers[idx + 1], self.layers[idx]
-        self.active_layer_index += 1
-        self.add_action(
-            MoveLayerAction(
-                from_index=idx,
-                to_index=idx + 1,
-                active_index_before=prev_active_idx,
-                active_index_after=self.active_layer_index,
-            )
-        )
-        self.pixel_canvas.force_redraw()
-        self._update_layers_ui()
-
-    def move_layer_down(self):
-        idx = self.active_layer_index
-        if idx <= 0:
-            return
-        prev_active_idx = self.active_layer_index
-        self.layers[idx], self.layers[idx - 1] = self.layers[idx - 1], self.layers[idx]
-        self.active_layer_index -= 1
-        self.add_action(
-            MoveLayerAction(
-                from_index=idx,
-                to_index=idx - 1,
-                active_index_before=prev_active_idx,
-                active_index_after=self.active_layer_index,
-            )
-        )
-        self.pixel_canvas.force_redraw()
-        self._update_layers_ui()
-
-    def merge_layer_down(self):
-        idx = self.active_layer_index
-        if idx <= 0:
-            return
-
-        upper_orig = copy.deepcopy(self.layers[idx])
-        lower_orig = copy.deepcopy(self.layers[idx - 1])
-
-        upper = self.layers[idx]
-        lower = self.layers[idx - 1]
-
-        merged_data = {}
-        lower_opacity_factor = lower.opacity / 255.0
-
-        for coord, (hex_val, alpha) in lower.pixel_data.items():
-            baked_alpha = int(alpha * lower_opacity_factor)
-            if baked_alpha > 0:
-                merged_data[coord] = (hex_val, baked_alpha)
-
-        upper_opacity_factor = upper.opacity / 255.0
-
-        for coord, (upper_hex, upper_alpha) in upper.pixel_data.items():
-
-            effective_alpha = int(upper_alpha * upper_opacity_factor)
-
-            if effective_alpha == 0:
-                continue
-
-            bg_pixel = merged_data.get(coord)
-
-            final_hex, final_alpha = upper_hex, effective_alpha
-
-            if self.color_blending_var.get() and 0 < effective_alpha < 255 and bg_pixel:
-                bg_hex, bg_a_int = bg_pixel
-                final_hex, final_alpha = canvas_cython_helpers.blend_colors_cy(
-                    upper_hex, effective_alpha, bg_hex, bg_a_int
-                )
-
-            if final_alpha > 0:
-                merged_data[coord] = (final_hex, final_alpha)
-            elif coord in merged_data:
-                del merged_data[coord]
-
-        lower.pixel_data = merged_data
-        lower.opacity = 255
-
-        self.layers.pop(idx)
-        self.active_layer_index = idx - 1
-
-        merged_lower_final = copy.deepcopy(self.layers[idx - 1])
-
-        action = MergeLayerAction(upper_orig, lower_orig, merged_lower_final, idx)
-        self.add_action(action)
-
-        self.pixel_canvas.force_redraw()
-        self._update_layers_ui()
-
-    def duplicate_layer(self):
-        if not self.active_layer:
-            return
-        orig_layer, prev_idx = self.active_layer, self.active_layer_index
-        insert_pos = prev_idx + 1
-        new_layer = Layer(name=f"{orig_layer .name } copy")
-        new_layer.pixel_data, new_layer.visible = (
-            copy.deepcopy(orig_layer.pixel_data),
-            orig_layer.visible,
-        )
-        new_layer.opacity = orig_layer.opacity
-        action = DuplicateLayerAction(new_layer, insert_pos, prev_idx)
-        action.redo(self)
-        self.add_action(action)
-        self.pixel_canvas.force_redraw()
-        self._update_layers_ui()
+        self.layer_panel = LayerPanel(layers_frame, self)
 
     def setup_drag_and_drop(self):
         self.root.drop_target_register(DND_FILES)
@@ -1000,14 +628,14 @@ class PixelArtApp:
             "New", "Clear canvas? Unsaved changes may be lost."
         ):
             return
-        self._initialize_layers()
+        self.layer_panel.initialize_layers()
         self.current_filename = None
         self.canvas_bg_color = "#FFFFFF"
         self.root.title("Pixel Art Drawing App")
         self._update_canvas_workarea_color()
         self._clear_history()
         self.create_canvas()
-        self._update_layers_ui()
+        self.layer_panel.update_ui()
 
     def open_file(self):
         if any(
@@ -1028,7 +656,7 @@ class PixelArtApp:
                 old_w, old_h = self.canvas_width, self.canvas_height
                 self.canvas_width, self.canvas_height = img.width, img.height
 
-                self._initialize_layers()
+                self.layer_panel.initialize_layers()
                 self.layers[0].name = os.path.basename(filename)
 
                 rgba_data = img.tobytes()
@@ -1037,7 +665,7 @@ class PixelArtApp:
                 )
                 self._clear_history()
                 self.create_canvas()
-                self._update_layers_ui()
+                self.layer_panel.update_ui()
                 self.current_filename = filename
                 self.root.title(
                     f"Pixel Art Drawing App - {os .path .basename (filename )}"
