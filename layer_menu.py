@@ -37,6 +37,10 @@ class LayerPanel(ttk.Frame):
 
         self.drag_start_item = None
         self.drag_floating_window = None
+        self.drag_timer = None
+        self.drag_start_x = 0
+        self.drag_start_y = 0
+        self.drag_candidate_item = None
 
         self._setup_ui()
         self.initialize_layers()
@@ -113,6 +117,7 @@ class LayerPanel(ttk.Frame):
             self.tree.see(active_item_id)
 
     def _on_layer_select(self, event):
+
         if self.drag_start_item:
             return
         selected_items = self.tree.selection()
@@ -154,48 +159,94 @@ class LayerPanel(ttk.Frame):
                 self.rename_selected_layer()
 
     def on_layer_drag_start(self, event):
+
         region = self.tree.identify_region(event.x, event.y)
         if region == "tree" or region == "cell":
             item = self.tree.identify_row(event.y)
             if item:
-                self.drag_start_item = item
-                item_values = self.tree.item(item, "values")
-                if item_values:
-                    display_text = f"{item_values [0 ]} {item_values [1 ]}"
-                    self.drag_floating_window = tk.Toplevel(self.app.root)
-                    self.drag_floating_window.overrideredirect(True)
-                    self.drag_floating_window.attributes("-topmost", True)
-                    lbl = tk.Label(
-                        self.drag_floating_window,
-                        text=display_text,
-                        bg="#e1e1e1",
-                        fg="#000000",
-                        relief="solid",
-                        borderwidth=1,
-                    )
-                    lbl.pack()
-                    self.drag_floating_window.geometry(
-                        f"+{event .x_root +15 }+{event .y_root }"
-                    )
-                    self.tree.item(item, values=("", ""))
+                self.drag_candidate_item = item
+                self.drag_start_x = event.x
+                self.drag_start_y = event.y
+                self.drag_start_item = None
+
+                if self.drag_timer:
+                    self.after_cancel(self.drag_timer)
+                self.drag_timer = self.after(
+                    300, lambda: self._trigger_drag_start(event)
+                )
+
+    def _trigger_drag_start(self, event):
+
+        self.drag_timer = None
+        if not self.drag_candidate_item:
+            return
+
+        self.drag_start_item = self.drag_candidate_item
+        item_values = self.tree.item(self.drag_start_item, "values")
+
+        if item_values:
+            display_text = f"{item_values [0 ]} {item_values [1 ]}"
+            self.drag_floating_window = tk.Toplevel(self.app.root)
+            self.drag_floating_window.overrideredirect(True)
+            self.drag_floating_window.attributes("-topmost", True)
+            lbl = tk.Label(
+                self.drag_floating_window,
+                text=display_text,
+                bg="#e1e1e1",
+                fg="#000000",
+                relief="solid",
+                borderwidth=1,
+            )
+            lbl.pack()
+
+            if event:
+                self.drag_floating_window.geometry(
+                    f"+{event .x_root +15 }+{event .y_root }"
+                )
+            else:
+
+                self.drag_floating_window.geometry(
+                    f"+{self .winfo_pointerx ()+15 }+{self .winfo_pointery ()}"
+                )
+
+            self.tree.item(self.drag_start_item, values=("", ""))
 
     def on_layer_drag_motion(self, event):
-        if self.drag_floating_window:
-            self.drag_floating_window.geometry(
-                f"+{event .x_root +15 }+{event .y_root }"
-            )
+
         if self.drag_start_item:
+            if self.drag_floating_window:
+                self.drag_floating_window.geometry(
+                    f"+{event .x_root +15 }+{event .y_root }"
+                )
             target = self.tree.identify_row(event.y)
             if target:
                 self.tree.selection_set(target)
             return "break"
 
+        elif self.drag_candidate_item:
+            dx = abs(event.x - self.drag_start_x)
+            dy = abs(event.y - self.drag_start_y)
+
+            if dx > 15 or dy > 15:
+                if self.drag_timer:
+                    self.after_cancel(self.drag_timer)
+                    self.drag_timer = None
+                self._trigger_drag_start(event)
+
     def on_layer_drag_release(self, event):
+
+        if self.drag_timer:
+            self.after_cancel(self.drag_timer)
+            self.drag_timer = None
+
+        self.drag_candidate_item = None
+
         if self.drag_floating_window:
             self.drag_floating_window.destroy()
             self.drag_floating_window = None
 
         if not self.drag_start_item:
+
             return
 
         target_item = self.tree.identify_row(event.y)
