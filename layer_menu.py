@@ -36,6 +36,7 @@ class LayerPanel(ttk.Frame):
         self.active_layer_index = -1
 
         self.drag_start_item = None
+        self.drag_orig_index = -1
         self.drag_floating_window = None
         self.drag_timer = None
         self.drag_start_x = 0
@@ -102,6 +103,7 @@ class LayerPanel(ttk.Frame):
     def update_ui(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
+
         for i, layer in reversed(list(enumerate(self.layers))):
             self.tree.insert(
                 "",
@@ -168,6 +170,7 @@ class LayerPanel(ttk.Frame):
                 self.drag_start_x = event.x
                 self.drag_start_y = event.y
                 self.drag_start_item = None
+                self.drag_orig_index = -1
 
                 if self.drag_timer:
                     self.after_cancel(self.drag_timer)
@@ -182,6 +185,9 @@ class LayerPanel(ttk.Frame):
             return
 
         self.drag_start_item = self.drag_candidate_item
+
+        self.drag_orig_index = self.tree.index(self.drag_start_item)
+
         item_values = self.tree.item(self.drag_start_item, "values")
 
         if item_values:
@@ -214,13 +220,21 @@ class LayerPanel(ttk.Frame):
     def on_layer_drag_motion(self, event):
 
         if self.drag_start_item:
+
             if self.drag_floating_window:
                 self.drag_floating_window.geometry(
                     f"+{event .x_root +15 }+{event .y_root }"
                 )
-            target = self.tree.identify_row(event.y)
-            if target:
-                self.tree.selection_set(target)
+
+            target_item = self.tree.identify_row(event.y)
+
+            if target_item and target_item != self.drag_start_item:
+                target_index = self.tree.index(target_item)
+                current_index = self.tree.index(self.drag_start_item)
+
+                if current_index != target_index:
+                    self.tree.move(self.drag_start_item, "", target_index)
+
             return "break"
 
         elif self.drag_candidate_item:
@@ -246,45 +260,39 @@ class LayerPanel(ttk.Frame):
             self.drag_floating_window = None
 
         if not self.drag_start_item:
-
             return
 
-        target_item = self.tree.identify_row(event.y)
-        to_index = -1
+        to_index = self.tree.index(self.drag_start_item)
 
-        if target_item:
-            to_index = int(target_item)
-        else:
-            if event.y < 0:
-                to_index = len(self.layers) - 1
-            else:
-                to_index = 0
+        from_index = self.drag_orig_index
 
-        from_index = int(self.drag_start_item)
         self.drag_start_item = None
+        self.drag_orig_index = -1
 
-        if to_index != -1 and to_index != from_index:
+        list_len = len(self.layers)
+
+        list_from_index = list_len - 1 - from_index
+        list_to_index = list_len - 1 - to_index
+
+        if list_to_index != list_from_index:
             prev_active_index = self.active_layer_index
             active_layer_obj = self.layers[self.active_layer_index]
 
-            layer_to_move = self.layers.pop(from_index)
-            self.layers.insert(to_index, layer_to_move)
+            layer_to_move = self.layers.pop(list_from_index)
+            self.layers.insert(list_to_index, layer_to_move)
 
             self.active_layer_index = self.layers.index(active_layer_obj)
 
             action = MoveLayerAction(
-                from_index=from_index,
-                to_index=to_index,
+                from_index=list_from_index,
+                to_index=list_to_index,
                 active_index_before=prev_active_index,
                 active_index_after=self.active_layer_index,
             )
             self.app.add_action(action)
             self.app.pixel_canvas.force_redraw()
-            self.update_ui()
-        else:
-            self.update_ui()
 
-        self.drag_start_item = None
+        self.update_ui()
 
     def add_layer(self, name=None, select=False, add_to_history=True):
         new_layer, prev_idx = Layer(name), self.active_layer_index
@@ -519,15 +527,8 @@ class LayerMenu(tk.Toplevel):
         ttk.Separator(self.frame, orient="horizontal").pack(fill=tk.X, pady=5)
 
         num_layers = len(self.layer_panel.layers)
-        can_move_up = layer_index < num_layers - 1
-        can_move_down = layer_index > 0
         can_merge_down = layer_index > 0
         can_delete = num_layers > 1
-
-        self._add_button("Move Up", self._cmd_move_up, can_move_up)
-        self._add_button("Move Down", self._cmd_move_down, can_move_down)
-
-        ttk.Separator(self.frame, orient="horizontal").pack(fill=tk.X, pady=5)
 
         self._add_button("Merge Down", self._cmd_merge_down, can_merge_down)
         self._add_button("Duplicate", self._cmd_duplicate, True)
@@ -608,14 +609,6 @@ class LayerMenu(tk.Toplevel):
                 if self.target_layer.opacity != val:
                     self.target_layer.opacity = val
                     self.app.pixel_canvas.force_redraw()
-
-    def _cmd_move_up(self):
-        self.layer_panel.move_layer_up()
-        self.destroy()
-
-    def _cmd_move_down(self):
-        self.layer_panel.move_layer_down()
-        self.destroy()
 
     def _cmd_merge_down(self):
         self.layer_panel.merge_layer_down()
