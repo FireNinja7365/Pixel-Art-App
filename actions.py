@@ -1,16 +1,12 @@
 class Action:
-
     def undo(self, app):
-
         raise NotImplementedError
 
     def redo(self, app):
-
         raise NotImplementedError
 
 
 class PixelAction(Action):
-
     def __init__(self, layer_index, pixels_before, pixels_after):
         self.layer_index = layer_index
         self.pixels_before = pixels_before
@@ -38,7 +34,6 @@ class PixelAction(Action):
 
 
 class AddLayerAction(Action):
-
     def __init__(self, layer_obj, index, prev_active_index):
         self.layer_obj = layer_obj
         self.index = index
@@ -47,14 +42,15 @@ class AddLayerAction(Action):
     def undo(self, app):
         app.layers.pop(self.index)
         app.active_layer_index = self.prev_active_index
+        app.layer_panel.update_ui()
 
     def redo(self, app):
         app.layers.insert(self.index, self.layer_obj)
         app.active_layer_index = self.index
+        app.layer_panel.update_ui()
 
 
 class DuplicateLayerAction(Action):
-
     def __init__(self, layer_obj, index, prev_active_index):
         self.layer_obj = layer_obj
         self.index = index
@@ -63,14 +59,17 @@ class DuplicateLayerAction(Action):
     def undo(self, app):
         app.layers.pop(self.index)
         app.active_layer_index = self.prev_active_index
+        app.pixel_canvas.force_redraw()
+        app.layer_panel.update_ui()
 
     def redo(self, app):
         app.layers.insert(self.index, self.layer_obj)
         app.active_layer_index = self.index
+        app.pixel_canvas.force_redraw()
+        app.layer_panel.update_ui()
 
 
 class DeleteLayerAction(Action):
-
     def __init__(self, layer_obj, index, prev_active_index, new_active_index):
         self.layer_obj = layer_obj
         self.index = index
@@ -80,14 +79,17 @@ class DeleteLayerAction(Action):
     def undo(self, app):
         app.layers.insert(self.index, self.layer_obj)
         app.active_layer_index = self.prev_active_index
+        app.pixel_canvas.force_redraw()
+        app.layer_panel.update_ui()
 
     def redo(self, app):
         app.layers.pop(self.index)
         app.active_layer_index = self.new_active_index
+        app.pixel_canvas.force_redraw()
+        app.layer_panel.update_ui()
 
 
 class MoveLayerAction(Action):
-
     def __init__(self, from_index, to_index, active_index_before, active_index_after):
         self.from_index = from_index
         self.to_index = to_index
@@ -95,23 +97,21 @@ class MoveLayerAction(Action):
         self.active_index_after = active_index_after
 
     def undo(self, app):
-
         layer = app.layers.pop(self.to_index)
         app.layers.insert(self.from_index, layer)
         app.active_layer_index = self.active_index_before
         app.pixel_canvas.force_redraw()
-        app._update_layers_ui()
+        app.layer_panel.update_ui()
 
     def redo(self, app):
         layer = app.layers.pop(self.from_index)
         app.layers.insert(self.to_index, layer)
         app.active_layer_index = self.active_index_after
         app.pixel_canvas.force_redraw()
-        app._update_layers_ui()
+        app.layer_panel.update_ui()
 
 
 class RenameLayerAction(Action):
-
     def __init__(self, layer_index, old_name, new_name):
         self.layer_index = layer_index
         self.old_name = old_name
@@ -119,13 +119,14 @@ class RenameLayerAction(Action):
 
     def undo(self, app):
         app.layers[self.layer_index].name = self.old_name
+        app.layer_panel.update_ui()
 
     def redo(self, app):
         app.layers[self.layer_index].name = self.new_name
+        app.layer_panel.update_ui()
 
 
 class MergeLayerAction(Action):
-
     def __init__(
         self,
         upper_layer_obj,
@@ -143,10 +144,13 @@ class MergeLayerAction(Action):
         app.layers.insert(self.upper_layer_index - 1, self.lower_layer_obj)
         app.layers.insert(self.upper_layer_index, self.upper_layer_obj)
         app.active_layer_index = self.upper_layer_index
+        app.pixel_canvas.force_redraw()
+        app.layer_panel.update_ui()
 
     def redo(self, app):
-
         app.layers.pop(self.upper_layer_index)
         app.layers.pop(self.upper_layer_index - 1)
         app.layers.insert(self.upper_layer_index - 1, self.merged_lower_layer_obj)
         app.active_layer_index = self.upper_layer_index - 1
+        app.pixel_canvas.force_redraw()
+        app.layer_panel.update_ui()
