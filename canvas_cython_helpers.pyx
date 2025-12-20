@@ -306,8 +306,7 @@ cpdef tuple flood_fill_apply_cy(
     int canvas_width, int canvas_height,
     dict active_layer_data,
     tuple target_data,
-    str new_hex, int new_alpha,
-    bint color_blending
+    str new_hex, int new_alpha
 ):
     cdef dict pixels_before = {}
     cdef dict pixels_after = {}
@@ -367,10 +366,6 @@ cpdef tuple flood_fill_apply_cy(
             applied_hex = new_hex
             applied_alpha = new_alpha
 
-            if color_blending and 0 < new_alpha < 255:
-                original_pixel = pixels_before.get((px, py))
-                if original_pixel and original_pixel[1] > 0:
-                    applied_hex, applied_alpha = blend_colors_cy(new_hex, new_alpha, original_pixel[0], original_pixel[1])
 
             if applied_alpha > 0:
                 final_pixel_data = (applied_hex, applied_alpha)
