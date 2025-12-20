@@ -137,10 +137,7 @@ class LayerPanel(ttk.Frame):
             item_id = self.tree.identify_row(event.y)
             column = self.tree.identify_column(event.x)
             if item_id and column == "#1":
-                layer_index = int(item_id)
-                self.layers[layer_index].visible = not self.layers[layer_index].visible
-                self.app.pixel_canvas.force_redraw()
-                self.update_ui()
+                self._toggle_layer_visibility(item_id)
                 return "break"
 
     def _on_layer_right_click(self, event):
@@ -155,10 +152,27 @@ class LayerPanel(ttk.Frame):
 
     def _on_layer_rename_start(self, event):
         region = self.tree.identify_region(event.x, event.y)
-        if region == "cell" and self.tree.identify_column(event.x) == "#2":
-            if item_id := self.tree.identify_row(event.y):
+        column = self.tree.identify_column(event.x)
+        item_id = self.tree.identify_row(event.y)
+
+        if region == "cell" and item_id:
+            if column == "#1":
+
+                self._toggle_layer_visibility(item_id)
+            elif column == "#2":
                 self.tree.selection_set(item_id)
                 self.rename_selected_layer()
+
+    def _toggle_layer_visibility(self, item_id):
+
+        layer_index = int(item_id)
+        layer = self.layers[layer_index]
+        layer.visible = not layer.visible
+
+        new_status = "✅" if layer.visible else "❌"
+        self.tree.set(item_id, column="vis", value=new_status)
+
+        self.app.pixel_canvas.force_redraw()
 
     def on_layer_drag_start(self, event):
 
@@ -463,7 +477,6 @@ class LayerMenu(tk.Toplevel):
 
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.geometry(f"+{x }+{y }")
 
         self.configure(bg="#e1e1e1")
 
@@ -486,11 +499,9 @@ class LayerMenu(tk.Toplevel):
 
         opacity_frame = ttk.Frame(self.frame)
         opacity_frame.pack(fill=tk.X, pady=(0, 5))
-
         ttk.Label(opacity_frame, text="Opacity:").pack(side=tk.LEFT, padx=(0, 2))
 
         self.opacity_var = tk.IntVar(value=self.target_layer.opacity)
-
         self.opacity_slider = tk.Scale(
             opacity_frame,
             from_=0,
@@ -527,17 +538,31 @@ class LayerMenu(tk.Toplevel):
         ttk.Separator(self.frame, orient="horizontal").pack(fill=tk.X, pady=5)
 
         num_layers = len(self.layer_panel.layers)
-        can_merge_down = layer_index > 0
-        can_delete = num_layers > 1
-
-        self._add_button("Merge Down", self._cmd_merge_down, can_merge_down)
+        self._add_button("Merge Down", self._cmd_merge_down, layer_index > 0)
         self._add_button("Duplicate", self._cmd_duplicate, True)
-
         ttk.Separator(self.frame, orient="horizontal").pack(fill=tk.X, pady=5)
-
         self._add_button("Rename", self._cmd_rename, True)
+        self._add_button(
+            "Delete", self._cmd_delete, num_layers > 1, style="Danger.TButton"
+        )
 
-        self._add_button("Delete", self._cmd_delete, can_delete, style="Danger.TButton")
+        self.update_idletasks()
+
+        menu_width = self.winfo_reqwidth()
+        menu_height = self.winfo_reqheight()
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+
+        if x + menu_width > screen_width:
+            x = x - menu_width
+
+        if y + menu_height > screen_height:
+            y = y - menu_height
+
+        x = max(0, x)
+        y = max(0, y)
+
+        self.geometry(f"+{x }+{y }")
 
         self.after(10, self._set_initial_focus)
         self.bind("<FocusOut>", self._on_focus_out)
