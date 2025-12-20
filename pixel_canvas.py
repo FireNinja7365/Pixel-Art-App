@@ -532,8 +532,7 @@ class PixelCanvas(ttk.Frame):
         target_data = active_layer_data.get((start_x, start_y), ("transparent", 0))
         new_pixel_data = (new_color_hex, new_alpha)
 
-        is_blending = self.app.color_blending_var.get()
-        if target_data == new_pixel_data and not (is_blending and 0 < new_alpha < 255):
+        if target_data == new_pixel_data:
             return
 
         if target_data == ("transparent", 0) and new_alpha == 0:
@@ -548,7 +547,6 @@ class PixelCanvas(ttk.Frame):
             target_data,
             new_color_hex,
             new_alpha,
-            is_blending,
         )
 
         if not pixels_before:
