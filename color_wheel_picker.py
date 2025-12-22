@@ -16,6 +16,10 @@ from utilities import (
 
 
 class ColorWheelPicker(ttk.Frame):
+
+    _cached_hue_wheel_image = None
+    _cached_hue_wheel_pil = None
+
     def __init__(
         self, parent, color_change_callback, show_alpha=True, show_preview=True
     ):
@@ -270,8 +274,8 @@ class ColorWheelPicker(ttk.Frame):
         if self.alpha_slider.get() != self.alpha:
             self.alpha_slider.set(self.alpha)
 
-    def create_hue_wheel(self):
-        size = 150
+    @classmethod
+    def _generate_hue_wheel_image(cls, size=150):
 
         supersample = 4
         render_size = size * supersample
@@ -295,8 +299,19 @@ class ColorWheelPicker(ttk.Frame):
                     pixels[x, y] = tuple(int(c * 255) for c in rgb_float) + (255,)
 
         image = image.resize((size, size), Image.Resampling.LANCZOS)
+        return image
 
-        self.hue_wheel_image = ImageTk.PhotoImage(image)
+    def create_hue_wheel(self):
+        size = 150
+
+        if ColorWheelPicker._cached_hue_wheel_pil is None:
+            ColorWheelPicker._cached_hue_wheel_pil = self._generate_hue_wheel_image(
+                size
+            )
+
+        self.hue_wheel_image = ImageTk.PhotoImage(
+            ColorWheelPicker._cached_hue_wheel_pil
+        )
 
         self.color_canvas.create_image(
             size // 2, size // 2, image=self.hue_wheel_image, tags="hue_area"
